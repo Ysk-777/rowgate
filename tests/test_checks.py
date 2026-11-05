@@ -331,3 +331,10 @@ def test_checks_can_use_the_positional_name_of_an_unnamed_column(tmp_path: Path)
     data = b",order_id\n0,1001\n1,1002\n1,1003\n"
     result = only(run(tmp_path, "  - {rule: unique, column: column_1}\n", data))
     assert (result.column, result.failing_rows) == ("column_1", 2)
+
+
+def test_checks_ignore_trailing_blank_lines_in_a_one_column_file(tmp_path: Path) -> None:
+    checks = "  - {rule: not_null, column: v}\n  - {rule: row_count, min: 3, max: 3}\n"
+    report = run(tmp_path, checks, b"v\na\nb\nc\n\n\n")
+    assert [(r.ok, r.failing_rows) for r in report.results] == [(True, 0), (True, None)]
+    assert report.row_count == 3

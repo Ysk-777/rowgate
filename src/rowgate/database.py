@@ -39,6 +39,9 @@ def connect(readable_file: Path | None = None) -> duckdb.DuckDBPyConnection:
             connection.execute("SET allowed_paths = $paths", {"paths": [str(readable_file)]})
         connection.execute("SET enable_external_access = false")
         connection.execute("SET TimeZone = 'UTC'")
+        # Results without ORDER BY keep file order; RowGate relies on this for
+        # LIMIT and row numbers. (It is DuckDB's default; set to be certain.)
+        connection.execute("SET preserve_insertion_order = true")
         connection.execute("SET lock_configuration = true")
     except BaseException:
         connection.close()

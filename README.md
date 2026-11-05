@@ -70,8 +70,11 @@ DuckDB fixed options, with DuckDB's automatic detection switched off:
 - The first line is always the header. Lines starting with `#` are data, not
   comments. A comment line above the header becomes the header, which then
   fails with a clear error.
-- Every line must have as many fields as the header, and blank lines are an
-  error. (A blank line in a one-column file is a row with an empty value.)
+- Every line must have as many fields as the header. A line of spaces is not
+  blank: it is a line with one field.
+- Blank lines at the end of the file are ignored. A blank line followed by
+  more data is an error in a file with several columns. In a one-column file
+  it is an empty value (NULL), so a one-column file cannot end with a NULL.
 - The file must be UTF-8. A byte-order mark is allowed and is not part of the
   first column name. Invalid UTF-8 is an error that names the line and byte
   offset.

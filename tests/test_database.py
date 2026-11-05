@@ -63,6 +63,7 @@ def test_settings(connection: duckdb.DuckDBPyConnection) -> None:
     assert setting(connection, "autoload_known_extensions") is False
     assert setting(connection, "allow_community_extensions") is False
     assert setting(connection, "TimeZone") == "UTC"
+    assert setting(connection, "preserve_insertion_order") is True
     assert setting(connection, "lock_configuration") is True
 
 

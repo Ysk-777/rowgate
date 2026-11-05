@@ -15,6 +15,7 @@ from rowgate.errors import DataError
 from rowgate.rules import Source
 from rowgate.source import (
     Column,
+    CsvLayout,
     Dataset,
     _describe,
     _find_invalid_utf8,
@@ -282,7 +283,8 @@ def test_blank_lines_are_an_error(tmp_path: Path) -> None:
     # detection off, so RowGate refuses them instead of losing count.
     message = data_error(tmp_path, b"id,name\n1,a\n\n2,b\n")
     assert message == (
-        "line 3 of 'data.csv' is blank; RowGate does not skip blank lines, so remove it"
+        "line 3 of 'data.csv' is blank; RowGate ignores blank lines only at the end of a file, "
+        "so remove it"
     )
 
 
@@ -307,8 +309,8 @@ def test_row_count_matches_the_data_lines(tmp_path: Path) -> None:
 def test_a_disagreement_with_duckdb_stops_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def miscount(path: Path, delimiter: str, shown: str) -> tuple[list[str], int]:
-        return ["id"], 3
+    def miscount(path: Path, delimiter: str, shown: str) -> CsvLayout:
+        return CsvLayout(["id"], rows=3, trailing_blank_lines=0)
 
     monkeypatch.setattr(source_module, "scan_csv", miscount)
     assert data_error(tmp_path, b"id\n1\n2\n") == (
@@ -819,9 +821,7 @@ def test_a_duckdb_csv_error_names_the_line_but_never_the_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Skip RowGate's own checks so that DuckDB meets the stray quote itself.
-    monkeypatch.setattr(
-        source_module, "scan_csv", lambda path, delimiter, shown: (["id", "name"], 3)
-    )
+    monkeypatch.setattr(source_module, "scan_csv", lambda *args: CsvLayout(["id", "name"], 3, 0))
     message = data_error(tmp_path, b'id,name\n1,a\n2,"private-value"x\n3,c\n')
     assert message == f"DuckDB could not read line 3 of 'data.csv' as CSV; {NOT_SHOWN}"
 
@@ -871,4 +871,64 @@ def test_a_parquet_schema_that_cannot_be_described_is_a_data_error(tmp_path: Pat
 def test_a_parquet_metadata_error_without_text() -> None:
     assert _metadata_error(duckdb.IOException(""), "d.parquet").message == (
         "cannot read 'd.parquet' as Parquet: unknown error"
+    )
+
+
+# --- blank lines at the end of a file ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"id,name\n1,a\n2,b\n\n", b"id,name\n1,a\n2,b\n\n\n\n", b"id,name\r\n1,a\r\n2,b\r\n\r\n\r\n"],
+    ids=["one", "three", "crlf"],
+)
+def test_trailing_blank_lines_are_ignored(tmp_path: Path, content: bytes) -> None:
+    with open_csv(tmp_path, content) as dataset:
+        assert dataset.row_count == 2
+        assert rows(dataset) == [("1", "a"), ("2", "b")]
+
+
+def test_trailing_blank_lines_are_not_nulls_in_a_one_column_file(tmp_path: Path) -> None:
+    # DuckDB alone reads these blank lines as two NULL rows.
+    with open_csv(tmp_path, b"v\n1\n2\n\n\n") as dataset:
+        assert dataset.row_count == 2
+        assert rows(dataset) == [("1",), ("2",)]
+
+
+def test_a_blank_line_inside_a_one_column_file_is_still_a_null(tmp_path: Path) -> None:
+    with open_csv(tmp_path, b"v\n1\n\n2\n\n") as dataset:
+        assert dataset.row_count == 3
+        assert rows(dataset) == [("1",), (None,), ("2",)]
+
+
+def test_trailing_blank_lines_in_a_large_one_column_file(tmp_path: Path) -> None:
+    content = b"v\n" + b"".join(b"%d\n" % i for i in range(1, 100_001)) + b"\n\n\n"
+    with open_csv(tmp_path, content) as dataset:
+        assert dataset.row_count == 100_000
+        numbered = f"SELECT row_number() OVER () AS rn, v FROM {dataset.relation}"  # noqa: S608
+        summary = (
+            "SELECT [count(*), count(*) FILTER (WHERE v IS NULL), max(v::INTEGER), "  # noqa: S608
+            f"count(*) FILTER (WHERE v::INTEGER <> rn)] FROM ({numbered})"
+        )
+        # 100,000 rows in file order, no NULLs from the blank lines.
+        assert dataset.scalar(summary) == [100_000, 0, 100_000, 0]
+
+
+@pytest.mark.parametrize(
+    "content", [b"id,name\n\n\n", b"v\n\n\n"], ids=["two-columns", "one-column"]
+)
+def test_a_header_followed_only_by_blank_lines_has_no_rows(tmp_path: Path, content: bytes) -> None:
+    with open_csv(tmp_path, content) as dataset:
+        assert dataset.row_count == 0
+
+
+def test_blank_lines_followed_by_data_are_still_an_error(tmp_path: Path) -> None:
+    assert data_error(tmp_path, b"id,name\n1,a\n\n\n2,b\n\n").startswith(
+        "line 3 of 'data.csv' is blank; RowGate ignores blank lines only at the end of a file"
+    )
+
+
+def test_a_line_of_spaces_at_the_end_is_not_blank(tmp_path: Path) -> None:
+    assert data_error(tmp_path, b"id,name\n1,a\n   \n") == (
+        "line 3 of 'data.csv' has 1 field, but the header has 2 fields"
     )

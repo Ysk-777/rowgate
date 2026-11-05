@@ -61,6 +61,9 @@ _CSV_OPTIONS = ", ".join(
     ]
 )
 CSV_RELATION = f"read_csv($rowgate_path, {_CSV_OPTIONS})"
+# The same rows without the blank lines at the end of a one-column file.
+# LIMIT keeps file order, because connect() preserves insertion order.
+CSV_RELATION_FIRST_ROWS = f"(SELECT * FROM {CSV_RELATION} LIMIT $rowgate_rows)"  # noqa: S608
 PARQUET_RELATION = "read_parquet($rowgate_path)"
 
 DEFAULT_DELIMITER = ","
@@ -74,6 +77,15 @@ _QUOTE_HINT = (
 # kept; the rest can quote the row itself, so it is never shown.
 _DUCKDB_CSV_LINE = re.compile(r"CSV Error on Line: ([0-9]+)")
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+@dataclass(frozen=True)
+class CsvLayout:
+    """What the Python pass learned about a CSV file."""
+
+    header: list[str]  # column names, with positional names for empty ones
+    rows: int  # data rows, not counting blank lines at the end of the file
+    trailing_blank_lines: int
 
 
 @dataclass(frozen=True)
@@ -144,11 +156,10 @@ def open_dataset(rules_path: Path, source: Source) -> Dataset:
     connection = database.connect(path)
     try:
         params: dict[str, object] = {"rowgate_path": str(path)}
-        scanned_rows: int | None = None
         if source.file_format == "csv":
             delimiter = source.delimiter or DEFAULT_DELIMITER
-            header, scanned_rows = scan_csv(path, delimiter, shown)
-            params["rowgate_columns"] = dict.fromkeys(header, "VARCHAR")
+            layout = scan_csv(path, delimiter, shown)
+            params["rowgate_columns"] = dict.fromkeys(layout.header, "VARCHAR")
             params["rowgate_delimiter"] = delimiter
             relation = CSV_RELATION
         else:
@@ -156,18 +167,17 @@ def open_dataset(rules_path: Path, source: Source) -> Dataset:
             relation = PARQUET_RELATION
 
         columns = _describe(connection, relation, params, shown, source.file_format)
-        if source.file_format == "csv" and [c.name for c in columns] != header:
-            raise DataError(f"DuckDB read different column names from {shown!r} than its header")
         # relation is CSV_RELATION or PARQUET_RELATION: fixed text, values bound.
         count_sql = f"SELECT count(*) FROM {relation}"  # noqa: S608
         row_count = _scalar(connection, count_sql, params, shown, source.file_format)
         if not isinstance(row_count, int):
             raise DataError(f"DuckDB returned no row count for {shown!r}")
-        if scanned_rows is not None and row_count != scanned_rows:
-            raise DataError(
-                f"{shown!r} has {scanned_rows} data rows, but DuckDB read {row_count}; "
-                "RowGate stops rather than check a partial file"
-            )
+        if source.file_format == "csv":
+            if [c.name for c in columns] != layout.header:
+                raise DataError(
+                    f"DuckDB read different column names from {shown!r} than its header"
+                )
+            relation, row_count = _without_trailing_blank_lines(layout, row_count, params, shown)
         return Dataset(
             connection,
             relation=relation,
@@ -180,6 +190,28 @@ def open_dataset(rules_path: Path, source: Source) -> Dataset:
     except BaseException:
         connection.close()
         raise
+
+
+def _without_trailing_blank_lines(
+    layout: CsvLayout, duckdb_rows: int, params: dict[str, object], shown: str
+) -> tuple[str, int]:
+    """Check DuckDB's row count against RowGate's and leave out trailing blank lines.
+
+    DuckDB skips blank lines in a file with several columns, but reads each
+    one as an empty value in a one-column file. Blank lines at the end of a
+    file are not data, so there RowGate reads only the rows before them.
+    """
+    one_column = len(layout.header) == 1
+    blank_rows = layout.trailing_blank_lines if one_column else 0
+    if duckdb_rows - blank_rows != layout.rows:
+        raise DataError(
+            f"{shown!r} has {layout.rows} data rows, but DuckDB read {duckdb_rows - blank_rows}; "
+            "RowGate stops rather than check a partial file"
+        )
+    if not blank_rows:
+        return CSV_RELATION, layout.rows
+    params["rowgate_rows"] = layout.rows
+    return CSV_RELATION_FIRST_ROWS, layout.rows
 
 
 def resolve_data_path(rules_path: Path, source: Source) -> Path:
@@ -204,7 +236,7 @@ def resolve_data_path(rules_path: Path, source: Source) -> Path:
     return path
 
 
-def scan_csv(path: Path, delimiter: str, shown: str) -> tuple[list[str], int]:
+def scan_csv(path: Path, delimiter: str, shown: str) -> CsvLayout:
     """Stream a CSV file once and return its header and number of data rows.
 
     Raises DataError for anything RowGate refuses to guess about: invalid
@@ -295,9 +327,7 @@ def _size(count: int) -> str:
     return f"{count // mib} MiB" if count % mib == 0 else f"{count} bytes"
 
 
-def _read_records(
-    reader: Iterator[list[str]], lines: _PhysicalLines, shown: str
-) -> tuple[list[str], int]:
+def _read_records(reader: Iterator[list[str]], lines: _PhysicalLines, shown: str) -> CsvLayout:
     header = next(reader, None)
     if header is None:
         raise DataError(f"{shown!r} has no header row")
@@ -310,6 +340,7 @@ def _read_records(
     width = len(header)
     looks_commented = header[0].startswith("#")
     rows = 0
+    blank_lines: list[int] = []  # blank lines not yet followed by more data
     for record in reader:
         start, end, ending = lines.record_start, lines.line, lines.ending
         lines.next_record()
@@ -321,12 +352,19 @@ def _read_records(
                 f"ends with {_ENDING_NAMES[first_ending]}; DuckDB cannot read a "
                 "file that mixes line endings, so save it with one kind"
             )
-        if not record and width > 1:
-            raise DataError(
-                f"line {start} of {shown!r} is blank; RowGate does not skip blank lines, "
-                "so remove it"
-            )
-        if record and len(record) != width:
+        if not record:
+            blank_lines.append(start)
+            continue
+        if blank_lines:
+            if width > 1:
+                raise DataError(
+                    f"line {blank_lines[0]} of {shown!r} is blank; RowGate ignores blank lines "
+                    "only at the end of a file, so remove it"
+                )
+            # In a one-column file a blank line inside the data is an empty (NULL) value.
+            rows += len(blank_lines)
+            blank_lines.clear()
+        if len(record) != width:
             hint = (
                 "; the first line starts with '#', and RowGate does not skip comment lines"
                 if looks_commented
@@ -336,8 +374,8 @@ def _read_records(
                 f"line {start} of {shown!r} has {_fields(len(record))}, but the header has "
                 f"{_fields(width)}{hint}"
             )
-        rows += 1  # in a one-column file a blank line is a row with an empty (NULL) value
-    return header, rows
+        rows += 1
+    return CsvLayout(header, rows, trailing_blank_lines=len(blank_lines))
 
 
 def _fields(count: int) -> str:
