@@ -34,3 +34,14 @@ class RulesError(RowGateError):
         if len(self.problems) == 1:
             return [f"error: {self.path}: {self.problems[0]}"]
         return [f"error: {self.message}:", *(f"  - {problem}" for problem in self.problems)]
+
+
+class DataError(RowGateError):
+    """The data file is missing, unreadable, or does not fit the rules."""
+
+    def __init__(self, message: str, details: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.details = details or []
+
+    def lines(self) -> list[str]:
+        return [f"error: {self.message}", *(f"  {detail}" for detail in self.details)]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from rowgate.errors import RowGateError, RulesError
+from rowgate.errors import DataError, RowGateError, RulesError
 
 
 def test_plain_error_renders_one_line() -> None:
@@ -27,3 +27,9 @@ def test_rules_error_with_several_problems_renders_a_list() -> None:
 def test_rules_error_needs_a_problem() -> None:
     with pytest.raises(ValueError, match="at least one problem"):
         RulesError("rules.yaml", [])
+
+
+def test_data_error_renders_its_details_indented() -> None:
+    error = DataError("check 3 (not_null): no column 'x'", ["the file has: 'a', 'b'"])
+    assert error.lines() == ["error: check 3 (not_null): no column 'x'", "  the file has: 'a', 'b'"]
+    assert DataError("plain").lines() == ["error: plain"]
