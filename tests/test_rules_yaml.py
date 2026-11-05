@@ -136,3 +136,41 @@ def test_control_characters_are_refused() -> None:
 def test_yaml_error_without_position_is_still_reported() -> None:
     error = yaml.MarkedYAMLError(problem="something odd")
     assert _describe_marked_error(error) == "invalid YAML: something odd"
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        (
+            "a: 2024-02-30\n",
+            "invalid YAML at line 1, column 4: cannot read the value '2024-02-30' as timestamp: "
+            "day is out of range for month",
+        ),
+        (
+            "a: 2024-01-01 25:00:00\n",
+            "invalid YAML at line 1, column 4: cannot read the value '2024-01-01 25:00:00' "
+            "as timestamp: hour must be in 0..23",
+        ),
+        (
+            "a: !!int abc\n",
+            "invalid YAML at line 1, column 4: cannot read the value 'abc' as int: "
+            "invalid literal for int() with base 10: 'abc'",
+        ),
+        (
+            "a: !!bool maybe\n",
+            "invalid YAML at line 1, column 4: cannot read the value 'maybe' as bool: 'maybe'",
+        ),
+        (
+            "a: !!float x\n",
+            "invalid YAML at line 1, column 4: cannot read the value 'x' as float: "
+            "could not convert string to float: 'x'",
+        ),
+        (
+            "a:\n  - !!timestamp nope\n",
+            "invalid YAML at line 2, column 5: cannot read the value 'nope' as timestamp: "
+            "'NoneType' object has no attribute 'groupdict'",
+        ),
+    ],
+)
+def test_scalars_that_cannot_be_built_are_yaml_errors(text: str, problem: str) -> None:
+    assert yaml_problems(text) == [problem]

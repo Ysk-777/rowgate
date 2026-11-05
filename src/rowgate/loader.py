@@ -14,11 +14,27 @@ _MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
 class _RulesLoader(yaml.SafeLoader):
-    """The PyYAML safe loader, but duplicate mapping keys are an error.
+    """The PyYAML safe loader with two fixes for rules files.
 
-    Plain PyYAML keeps the last value of a duplicated key without a word,
-    which hides typos such as writing ``column:`` twice in one check.
+    Duplicate mapping keys are an error. Plain PyYAML keeps the last value
+    without a word, which hides typos such as writing ``column:`` twice.
+
+    A scalar that cannot be built, such as the date ``2024-02-30`` or
+    ``!!int abc``, becomes a YAML error with its position. Plain PyYAML lets
+    a bare ValueError, KeyError or AttributeError escape.
     """
+
+    def construct_object(self, node: yaml.Node, deep: bool = False) -> Any:
+        try:
+            return super().construct_object(node, deep=deep)
+        except yaml.YAMLError:
+            raise
+        except (ValueError, KeyError, AttributeError, TypeError, OverflowError) as exc:
+            tag = node.tag.rsplit(":", 1)[-1]
+            shown = f"{node.value!r} " if isinstance(node, yaml.ScalarNode) else ""
+            raise ConstructorError(
+                None, None, f"cannot read the value {shown}as {tag}: {exc}", node.start_mark
+            ) from None
 
 
 def _construct_mapping(loader: _RulesLoader, node: yaml.MappingNode) -> dict[Any, Any]:
