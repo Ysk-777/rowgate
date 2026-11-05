@@ -415,11 +415,11 @@ def test_every_problem_in_the_file_is_reported_together(tmp_path: Path) -> None:
             ],
         ),
         (
-            "{rule: in_set, column: answer, values: [yes, maybe]}",
+            "{rule: in_set, column: answer, values: [true, maybe]}",
             [
                 "check 1 (in_set), field 'values': all values must be the same kind, but this "
-                "list mixes boolean and text values; YAML reads unquoted yes, no, true, false, "
-                "on and off as booleans, so quote them to use text"
+                "list mixes boolean and text values; true and false are booleans; put them in "
+                "quotes, like 'true', to use them as text"
             ],
         ),
         (
@@ -639,13 +639,13 @@ def test_in_set_value_kinds(tmp_path: Path) -> None:
             "{rule: in_set, column: a, values: [new, '1', 'true']}",
             "{rule: in_set, column: b, values: [1, 2.5, -3]}",
             "{rule: in_set, column: c, values: [true, false]}",
-            "{rule: in_set, column: d, values: [yes, no]}",
+            "{rule: in_set, column: d, values: ['yes', 'no']}",
         ),
     )
     in_sets = [check for check in rules.checks if isinstance(check, InSet)]
-    assert [check.kind for check in in_sets] == ["text", "number", "boolean", "boolean"]
+    assert [check.kind for check in in_sets] == ["text", "number", "boolean", "text"]
     assert in_sets[0].values == ["new", "1", "true"]
-    assert in_sets[3].values == [True, False]
+    assert in_sets[3].values == ["yes", "no"]  # unquoted yes and no are refused
 
 
 def test_range_bounds(tmp_path: Path) -> None:
@@ -804,3 +804,163 @@ def test_long_alias_chains_do_not_exhaust_the_stack(tmp_path: Path) -> None:
     found = problems(tmp_path, "\n".join(lines) + "\n")
     assert len(found) == 2000
     assert found[0] == "check 1: expected a mapping of fields, got a list"
+
+
+# --- unquoted values that YAML 1.1 reads surprisingly --------------------------------------
+
+# Every case below sits at the first item of this check, line 4, column 40.
+SURPRISE_CHECK = "{rule: in_set, column: s, values: [%s]}"
+WHERE = "check 1 (in_set), field 'values', item 1"
+QUOTE = "put it in quotes ('{text}') for text (line 4, column 40)"
+
+
+def as_number(text: str, number: str) -> str:
+    return (
+        f"unquoted {text} is read by YAML as the number {number}; write {number} if you mean "
+        f"that number, or {QUOTE.format(text=text)}"
+    )
+
+
+def as_boolean(text: str, word: str) -> str:
+    return (
+        f"unquoted {text} is read by YAML as the boolean {word}; write true or false for a "
+        f"boolean, or {QUOTE.format(text=text)}"
+    )
+
+
+def as_text(text: str, number: str) -> str:
+    return (
+        f"unquoted {text} is read by YAML as text, not as the number {number}; write {number} "
+        f"if you mean that number, or {QUOTE.format(text=text)}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        # integers YAML 1.1 reads in a non-decimal way
+        ("0123", as_number("0123", "83")),
+        ("010", as_number("010", "8")),
+        ("00", as_number("00", "0")),
+        ("1:30", as_number("1:30", "90")),
+        ("1_000", as_number("1_000", "1000")),
+        ("0x1F", as_number("0x1F", "31")),
+        ("-0x1F", as_number("-0x1F", "-31")),
+        ("0b101", as_number("0b101", "5")),
+        # floats with underscores or sexagesimal parts
+        ("1_000.5", as_number("1_000.5", "1000.5")),
+        ("1:30.5", as_number("1:30.5", "90.5")),
+        # booleans other than true and false
+        ("yes", as_boolean("yes", "true")),
+        ("NO", as_boolean("NO", "false")),
+        ("on", as_boolean("on", "true")),
+        ("Off", as_boolean("Off", "false")),
+        ("True", as_boolean("True", "true")),
+        ("FALSE", as_boolean("FALSE", "false")),
+        # text in YAML 1.1 that YAML 1.2 and most languages read as numbers
+        ("1e3", as_text("1e3", "1000.0")),
+        ("1.0e3", as_text("1.0e3", "1000.0")),
+        ("+1E-2", as_text("+1E-2", "0.01")),
+        ("08", as_text("08", "8")),
+        ("-09", as_text("-09", "-9")),
+        ("0o17", as_text("0o17", "15")),
+    ],
+)
+def test_surprising_unquoted_values_are_refused(tmp_path: Path, text: str, message: str) -> None:
+    assert problems(tmp_path, rules_text(SURPRISE_CHECK % text)) == [f"{WHERE}: {message}"]
+
+
+@pytest.mark.parametrize(
+    ("check", "where"),
+    [
+        ("{rule: not_null, column: 0123}", "check 1 (not_null), field 'column'"),
+        ("{rule: unique, column: id, severity: yes}", "check 1 (unique), field 'severity'"),
+        ("{rule: row_count, min: 010}", "check 1 (row_count), field 'min'"),
+        ("{rule: range, column: a, max: 1_000}", "check 1 (range), field 'max'"),
+        ("{rule: regex, column: a, pattern: 08}", "check 1 (regex), field 'pattern'"),
+        (
+            "{rule: columns_exist, columns: [id, 1:30]}",
+            "check 1 (columns_exist), field 'columns', item 2",
+        ),
+        ("{rule: on, column: a}", "check 1, field 'rule'"),
+    ],
+)
+def test_surprising_values_are_refused_in_every_field(
+    tmp_path: Path, check: str, where: str
+) -> None:
+    [problem] = problems(tmp_path, rules_text(check))
+    assert split_problem(problem)[0] == where
+    assert "put it in quotes" in problem
+
+
+def test_surprising_values_in_version_and_source(tmp_path: Path) -> None:
+    text = (
+        "version: 0x1\nsource: {path: 1e3, delimiter: on}\nchecks: [{rule: unique, column: id}]\n"
+    )
+    assert [split_problem(problem)[0] for problem in problems(tmp_path, text)] == [
+        "field 'version'",
+        "field 'source.path'",
+        "field 'source.delimiter'",
+    ]
+
+
+def test_surprising_mapping_keys_are_refused(tmp_path: Path) -> None:
+    text = "version: 1\nyes: 1\nsource: {path: a.csv}\nchecks: [{rule: unique, column: id}]\n"
+    assert problems(tmp_path, text) == [
+        "field 'yes': unquoted yes is read by YAML as the boolean true; write true or false for "
+        "a boolean, or put it in quotes ('yes') for text (line 2, column 1)"
+    ]
+
+
+def test_every_surprising_value_is_reported_in_file_order(tmp_path: Path) -> None:
+    text = rules_text(
+        "{rule: in_set, column: a, values: [ok, yes]}",
+        "{rule: not_null, column: 0123}",
+        "{rule: in_set, column: b, values: [1_000, 2]}",
+    )
+    assert [split_problem(problem)[0] for problem in problems(tmp_path, text)] == [
+        "check 1 (in_set), field 'values', item 2",
+        "check 2 (not_null), field 'column'",
+        "check 3 (in_set), field 'values', item 1",
+    ]
+
+
+def test_quoted_forms_keep_their_text(tmp_path: Path) -> None:
+    quoted = ["0123", "010", "1:30", "1_000", "0x1F", "yes", "NO", "on", "True", "1e3", "08"]
+    values = ", ".join(f"'{text}'" for text in quoted)
+    rules = load(tmp_path, rules_text(f"{{rule: in_set, column: s, values: [{values}]}}"))
+    [check] = rules.checks
+    assert isinstance(check, InSet)
+    assert check.values == quoted
+
+
+def test_plain_numbers_and_lowercase_booleans_are_accepted(tmp_path: Path) -> None:
+    rules = load(
+        tmp_path,
+        rules_text(
+            "{rule: in_set, column: n, values: [123, -5, 0, +7, -0, 1.5, .5, 1., 2.5e+3]}",
+            "{rule: in_set, column: b, values: [true, false]}",
+            "{rule: in_set, column: t, values: [y, n, '=', =, 1.2.3, 12abc]}",
+        ),
+    )
+    in_sets = [check for check in rules.checks if isinstance(check, InSet)]
+    assert [check.values for check in in_sets] == [
+        [123, -5, 0, 7, 0, 1.5, 0.5, 1.0, 2500.0],
+        [True, False],
+        ["y", "n", "=", "=", "1.2.3", "12abc"],
+    ]
+
+
+def test_explicit_tags_are_taken_at_their_word(tmp_path: Path) -> None:
+    rules = load(
+        tmp_path,
+        rules_text(
+            "{rule: row_count, min: !!int 0x1F}",
+            "{rule: in_set, column: s, values: [!!str 0123, !!str yes]}",
+        ),
+    )
+    row_count, in_set = rules.checks
+    assert isinstance(row_count, RowCount)
+    assert row_count.min == 31
+    assert isinstance(in_set, InSet)
+    assert in_set.values == ["0123", "yes"]

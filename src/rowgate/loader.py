@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import difflib
+import re
 import types
 import typing
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,10 +21,80 @@ from rowgate.errors import RulesError
 from rowgate.rules import RULE_MODELS, RulesFile, Source, describe_value
 
 _MERGE_TAG = "tag:yaml.org,2002:merge"
+_BOOL_TAG = "tag:yaml.org,2002:bool"
+_INT_TAG = "tag:yaml.org,2002:int"
+_FLOAT_TAG = "tag:yaml.org,2002:float"
+_STR_TAG = "tag:yaml.org,2002:str"
+_VALUE_TAG = "tag:yaml.org,2002:value"
+_AMBIGUOUS_TAG = "tag:rowgate,2026:ambiguous"
+
+_PLAIN_INT = re.compile(r"[-+]?(?:0|[1-9][0-9]*)")
+_LEADING_ZERO_INT = re.compile(r"[-+]?[0-9]+")
+_OCTAL_1_2 = re.compile(r"[-+]?0o[0-7]+")
+_NUMBER_LIKE = re.compile(
+    r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?|[-+]?0o[0-7]+"
+)
 
 # Rules files need about five levels; anything far deeper is a mistake or an
 # attack, and would otherwise exhaust Python's recursion limit.
 MAX_NESTING = 50
+
+
+@dataclass(frozen=True)
+class AmbiguousScalar:
+    """An unquoted value that YAML 1.1 reads in a way people rarely expect.
+
+    PyYAML implements YAML 1.1, where ``0123`` is the octal number 83, ``1:30``
+    is 90, ``1_000`` is 1000 and ``yes`` is a boolean, while ``1e3`` and ``08``
+    are text. RowGate refuses such values unless they are quoted, and accepts
+    only ``true`` and ``false`` as booleans.
+    """
+
+    text: str
+    meaning: object  # what PyYAML would have read
+    line: int
+    column: int
+
+    def describe(self) -> str:
+        where = f"(line {self.line}, column {self.column})"
+        quoted = f"put it in quotes ('{self.text}') for text"
+        if isinstance(self.meaning, bool):
+            word = "true" if self.meaning else "false"
+            return (
+                f"unquoted {self.text} is read by YAML as the boolean {word}; write true or "
+                f"false for a boolean, or {quoted} {where}"
+            )
+        if isinstance(self.meaning, int | float):
+            return (
+                f"unquoted {self.text} is read by YAML as the number {self.meaning}; write "
+                f"{self.meaning} if you mean that number, or {quoted} {where}"
+            )
+        number = _number_it_looks_like(self.text)
+        return (
+            f"unquoted {self.text} is read by YAML as text, not as the number {number}; write "
+            f"{number} if you mean that number, or {quoted} {where}"
+        )
+
+
+def _number_it_looks_like(text: str) -> int | float:
+    if _OCTAL_1_2.fullmatch(text):
+        sign = -1 if text.startswith("-") else 1
+        return sign * int(text.lstrip("+-")[2:], 8)
+    if _LEADING_ZERO_INT.fullmatch(text):
+        return int(text)
+    return float(text)
+
+
+def _is_ambiguous(tag: str, value: str) -> bool:
+    if tag == _BOOL_TAG:
+        return value not in ("true", "false")
+    if tag == _INT_TAG:
+        return _PLAIN_INT.fullmatch(value) is None
+    if tag == _FLOAT_TAG:
+        return "_" in value or ":" in value
+    if tag == _STR_TAG:
+        return _NUMBER_LIKE.fullmatch(value) is not None
+    return False
 
 
 class _RulesLoader(yaml.SafeLoader):
@@ -37,7 +109,31 @@ class _RulesLoader(yaml.SafeLoader):
 
     Nesting deeper than MAX_NESTING is an error. Plain PyYAML recurses once
     per level and crashes with RecursionError.
+
+    Unquoted values that YAML 1.1 reads surprisingly become AmbiguousScalar
+    markers, reported later with their check number and field. A bare ``=``
+    is text instead of PyYAML's unconstructable "value" tag.
     """
+
+    def resolve(
+        self, kind: type[yaml.Node], value: str | None, implicit: tuple[bool, bool] | bool
+    ) -> str:
+        # types-PyYAML leaves Resolver.resolve unannotated; it returns a tag string.
+        tag: str = super().resolve(kind, value, implicit)  # type: ignore[no-untyped-call]
+        # For scalars, implicit is (plain, quoted); for lists and mappings it is a bool.
+        plain = isinstance(implicit, tuple) and implicit[0]
+        if kind is yaml.ScalarNode and plain and value is not None:
+            if tag == _VALUE_TAG:
+                return _STR_TAG
+            if _is_ambiguous(tag, value):
+                return _AMBIGUOUS_TAG
+        return tag
+
+    def construct_ambiguous(self, node: yaml.ScalarNode) -> AmbiguousScalar:
+        tag = super().resolve(yaml.ScalarNode, node.value, (True, False))  # type: ignore[no-untyped-call]
+        meaning = node.value if tag == _STR_TAG else self.yaml_constructors[tag](self, node)
+        mark = node.start_mark
+        return AmbiguousScalar(node.value, meaning, mark.line + 1, mark.column + 1)
 
     def __init__(self, stream: str) -> None:
         super().__init__(stream)
@@ -98,6 +194,7 @@ def _construct_mapping(loader: _RulesLoader, node: yaml.MappingNode) -> Iterator
 
 
 _RulesLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
+_RulesLoader.add_constructor(_AMBIGUOUS_TAG, _RulesLoader.construct_ambiguous)
 
 
 def read_rules_text(path: Path) -> str:
@@ -162,7 +259,7 @@ def load_rules(path: Path) -> RulesFile:
 
 
 def find_structure_problems(data: object) -> list[str]:
-    """Find lists and mappings that contain themselves through an alias.
+    """Find ambiguous unquoted values and lists or mappings that contain themselves.
 
     Walks the data once, iteratively (no recursion), skipping containers it
     has already seen so shared aliases cannot make the walk explode.
@@ -173,6 +270,9 @@ def find_structure_problems(data: object) -> list[str]:
     stack: list[tuple[bool, object, tuple[int | str, ...]]] = [(False, data, ())]
     while stack:
         leaving, value, path = stack.pop()
+        if isinstance(value, AmbiguousScalar):
+            problems.append(_located(data, path, value.describe()))
+            continue
         if not isinstance(value, list | dict):
             continue
         ident = id(value)
@@ -181,9 +281,8 @@ def find_structure_problems(data: object) -> list[str]:
             finished.add(ident)
             continue
         if ident in on_path:
-            where = _raw_location(data, path)
             message = "an alias refers to the list or mapping that contains it"
-            problems.append(f"{where}: {message}" if where else message)
+            problems.append(_located(data, path, message))
             continue
         if ident in finished:
             continue
@@ -191,8 +290,19 @@ def find_structure_problems(data: object) -> list[str]:
         stack.append((True, value, path))
         children = value.items() if isinstance(value, dict) else enumerate(value)
         for key, child in reversed(list(children)):
-            stack.append((False, child, (*path, key if isinstance(key, int | str) else str(key))))
+            if isinstance(key, AmbiguousScalar):
+                stack.append((False, child, (*path, key.text)))
+                stack.append((False, key, (*path, key.text)))
+            else:
+                stack.append(
+                    (False, child, (*path, key if isinstance(key, int | str) else str(key)))
+                )
     return problems
+
+
+def _located(data: object, path: tuple[int | str, ...], message: str) -> str:
+    where = _raw_location(data, path)
+    return f"{where}: {message}" if where else message
 
 
 def _raw_location(data: object, path: tuple[int | str, ...]) -> str:

@@ -10,6 +10,7 @@ import yaml
 from rowgate.errors import RulesError
 from rowgate.loader import (
     MAX_NESTING,
+    AmbiguousScalar,
     _describe_marked_error,
     parse_rules_yaml,
     read_rules_text,
@@ -204,3 +205,16 @@ def test_a_mapping_that_contains_itself_can_be_parsed() -> None:
     data = parse_rules_yaml("source: &s {path: a.csv, again: *s}\n", "rules.yaml")
     assert isinstance(data, dict)
     assert data["source"]["again"] is data["source"]
+
+
+def test_surprising_scalars_are_marked_not_converted() -> None:
+    data = parse_rules_yaml("a: 0123\nb: [yes, '0123']\n", "rules.yaml")
+    assert data == {
+        "a": AmbiguousScalar(text="0123", meaning=83, line=1, column=4),
+        "b": [AmbiguousScalar(text="yes", meaning=True, line=2, column=5), "0123"],
+    }
+
+
+def test_a_bare_equals_sign_is_text() -> None:
+    # PyYAML resolves "=" to a "value" tag that it cannot construct.
+    assert parse_rules_yaml("a: =\nb: [=]\n", "rules.yaml") == {"a": "=", "b": ["="]}

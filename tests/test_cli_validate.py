@@ -223,3 +223,14 @@ def test_hostile_yaml_is_a_rules_error_not_a_crash(tmp_path: Path, text: str) ->
     assert (code, out) == (2, "")
     assert err.startswith(f"error: {tmp_path / 'rules.yaml'}: ")
     assert "internal error" not in err
+
+
+def test_surprising_yaml_values_exit_with_code_2(tmp_path: Path) -> None:
+    rules = write(tmp_path, VALID.replace("column: order_id", "column: 0123"))
+    code, out, err = run("validate", str(rules))
+    assert (code, out) == (2, "")
+    assert err == (
+        f"error: {rules}: check 1 (not_null), field 'column': unquoted 0123 is read by YAML as "
+        "the number 83; write 83 if you mean that number, or put it in quotes ('0123') for "
+        "text (line 6, column 13)\n"
+    )

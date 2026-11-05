@@ -202,10 +202,7 @@ def _in_set_value(value: object) -> InSetValue:
 
 def _mixed_kinds_hint(kinds: set[ValueKind]) -> str:
     if kinds == {"boolean", "text"}:
-        return (
-            "YAML reads unquoted yes, no, true, false, on and off as booleans, "
-            "so quote them to use text"
-        )
+        return "true and false are booleans; put them in quotes, like 'true', to use them as text"
     if "text" in kinds:
         return "quote numbers, like '1', to compare them as text"
     return "booleans and numbers are different kinds"
