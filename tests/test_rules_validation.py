@@ -964,3 +964,32 @@ def test_explicit_tags_are_taken_at_their_word(tmp_path: Path) -> None:
     assert row_count.min == 31
     assert isinstance(in_set, InSet)
     assert in_set.values == ["0123", "yes"]
+
+
+GLOB_HINT = "DuckDB treats *, ? and [ as file patterns, and reading several files is not supported"
+
+
+@pytest.mark.parametrize(
+    ("path", "found"),
+    [
+        ("s*.csv", "'*'"),
+        ("data/**/orders.csv", "'*'"),
+        ("q?.csv", "'?'"),
+        ("a[1].csv", "'['"),
+        ("[x]/*.parquet", "'*' and '['"),
+        ("w?ld[*].csv", "'*' and '?' and '['"),
+    ],
+)
+def test_glob_characters_in_the_source_path_are_refused(
+    tmp_path: Path, path: str, found: str
+) -> None:
+    text = rules_text("{rule: unique, column: id}", source=f"{{path: '{path}'}}")
+    assert problems(tmp_path, text) == [
+        f"field 'source.path': must not contain {found}; {GLOB_HINT}"
+    ]
+
+
+@pytest.mark.parametrize("path", ["a]1.csv", "a{1,2}.csv", "a(1).csv", "a!.csv", "a#1.csv"])
+def test_other_punctuation_in_the_source_path_is_fine(tmp_path: Path, path: str) -> None:
+    text = rules_text("{rule: unique, column: id}", source=f"{{path: '{path}'}}")
+    assert load(tmp_path, text).source.path == path

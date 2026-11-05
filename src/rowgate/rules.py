@@ -34,6 +34,10 @@ RangeBound = int | float | date
 
 FORMAT_BY_EXTENSION: dict[str, FileFormat] = {".csv": "csv", ".parquet": "parquet"}
 
+# DuckDB expands these in file paths even when the path is a bound parameter:
+# "a[1].csv" reads a1.csv and "s*.csv" reads every matching file.
+GLOB_CHARACTERS = ("*", "?", "[")
+
 _URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _MAX_SHOWN = 40
@@ -61,6 +65,12 @@ def describe_value(value: object) -> str:
     if isinstance(value, dict):
         return "a mapping"
     return f"a value of type {type(value).__name__}"
+
+
+def glob_characters(path: str) -> str:
+    """The characters in ``path`` that DuckDB would read as a glob pattern, quoted."""
+    found = [char for char in GLOB_CHARACTERS if char in path]
+    return " and ".join(f"'{char}'" for char in found)
 
 
 def value_kind(value: InSetValue) -> ValueKind:
@@ -97,6 +107,12 @@ class Source(_StrictModel):
             raise ValueError("must not contain a NUL character")
         if _URL.match(value):
             raise ValueError("URLs are not supported; RowGate reads local files only")
+        glob = glob_characters(value)
+        if glob:
+            raise ValueError(
+                f"must not contain {glob}; DuckDB treats *, ? and [ as file patterns, "
+                "and reading several files is not supported"
+            )
         return value
 
     @field_validator("format")
