@@ -118,6 +118,14 @@ never stops the run.
 Parquet columns keep the types stored in the file (`INTEGER`, `DOUBLE`,
 `DATE`, `BOOLEAN`, ...).
 
+Floating-point columns follow DuckDB's rules for NaN and zero:
+
+- NaN is a value, not NULL: `not_null` does not count it.
+- `unique` treats NaN as equal to NaN, so two NaNs are two failing rows.
+- `unique` treats `-0.0` and `0.0` as the same value.
+
+In a CSV file, `NaN` is only text, compared like any other text.
+
 ### Column names
 
 - Names are matched exactly, including case and spaces. Names with spaces,

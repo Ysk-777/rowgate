@@ -338,3 +338,45 @@ def test_checks_ignore_trailing_blank_lines_in_a_one_column_file(tmp_path: Path)
     report = run(tmp_path, checks, b"v\na\nb\nc\n\n\n")
     assert [(r.ok, r.failing_rows) for r in report.results] == [(True, 0), (True, None)]
     assert report.row_count == 3
+
+
+# --- NaN and signed zero in Parquet ---------------------------------------------------------
+
+
+@pytest.fixture
+def floats_parquet(tmp_path: Path) -> Path:
+    target = tmp_path / "data.parquet"
+    duckdb.connect(":memory:").execute(
+        "COPY (SELECT * FROM (VALUES "  # noqa: S608 - test data
+        "(1.0::DOUBLE, 1.0::FLOAT, 1), ('NaN'::DOUBLE, 'NaN'::FLOAT, 2), "
+        "('NaN'::DOUBLE, 'NaN'::FLOAT, 3), (NULL, NULL, 4)) t(d, f, n)) "
+        f"TO '{target}' (FORMAT parquet)"
+    )
+    return target
+
+
+@pytest.mark.parametrize("column", ["d", "f"], ids=["double", "float"])
+def test_nan_is_not_null(tmp_path: Path, floats_parquet: Path, column: str) -> None:
+    result = only(run(tmp_path, f"  - {{rule: not_null, column: {column}}}\n", name="data.parquet"))
+    assert result.failing_rows == 1  # only the real NULL
+
+
+@pytest.mark.parametrize("column", ["d", "f"], ids=["double", "float"])
+def test_two_nans_are_duplicates(tmp_path: Path, floats_parquet: Path, column: str) -> None:
+    result = only(run(tmp_path, f"  - {{rule: unique, column: {column}}}\n", name="data.parquet"))
+    assert result.failing_rows == 2
+
+
+def test_negative_and_positive_zero_are_duplicates(tmp_path: Path) -> None:
+    target = tmp_path / "data.parquet"
+    duckdb.connect(":memory:").execute(
+        "COPY (SELECT * FROM (VALUES (-0.0::DOUBLE), (0.0::DOUBLE)) t(z)) "  # noqa: S608 - test data
+        f"TO '{target}' (FORMAT parquet)"
+    )
+    result = only(run(tmp_path, "  - {rule: unique, column: z}\n", name="data.parquet"))
+    assert result.failing_rows == 2
+
+
+def test_nan_in_csv_is_just_text(tmp_path: Path) -> None:
+    result = only(run(tmp_path, "  - {rule: unique, column: v}\n", b"v\nNaN\nnan\nNaN\n"))
+    assert result.failing_rows == 2  # the two "NaN" texts; "nan" differs in case
