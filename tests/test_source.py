@@ -932,3 +932,30 @@ def test_a_line_of_spaces_at_the_end_is_not_blank(tmp_path: Path) -> None:
     assert data_error(tmp_path, b"id,name\n1,a\n   \n") == (
         "line 3 of 'data.csv' has 1 field, but the header has 2 fields"
     )
+
+
+@pytest.mark.parametrize(
+    ("blob_bytes", "long_records"),
+    [(1024 * 1024 - 3, False), (1024 * 1024 - 2, True)],
+    ids=["exactly-1-mib", "one-byte-more"],
+)
+def test_duckdb_line_limit_is_raised_only_for_long_records(
+    tmp_path: Path, blob_bytes: int, long_records: bool
+) -> None:
+    # A larger max_line_size slows every DuckDB scan, so it is used only for
+    # files with a record over 1 MiB ("1," + blob + "\n").
+    with open_csv(tmp_path, b"id,blob\n1," + b"x" * blob_bytes + b"\n") as dataset:
+        assert ("max_line_size" in dataset.relation) is long_records
+        assert dataset.row_count == 1
+
+
+def test_a_normal_file_uses_duckdb_default_line_limit(tmp_path: Path) -> None:
+    with open_csv(tmp_path, b"id,name\n1,a\n") as dataset:
+        assert dataset.relation == source_module.CSV_RELATION
+
+
+def test_long_records_and_trailing_blank_lines_together(tmp_path: Path) -> None:
+    with open_csv(tmp_path, b"v\n" + b"x" * 3_000_000 + b"\nshort\n\n\n") as dataset:
+        assert "max_line_size" in dataset.relation
+        assert "LIMIT" in dataset.relation
+        assert dataset.row_count == 2

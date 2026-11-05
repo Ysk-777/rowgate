@@ -35,9 +35,12 @@ from rowgate.rules import FileFormat, Source, glob_characters
 # quotes, counted in bytes with the line break.
 MAX_RECORD_BYTES = 16 * 1024 * 1024
 # DuckDB stops at its own max_line_size (2 MiB by default, also counted per
-# record). It is set well above RowGate's limit, so RowGate's check, which
-# names the line, always comes first.
+# record). For a file with a record over 1 MiB, it is set well above RowGate's
+# limit, so RowGate's check, which names the line, always comes first. It is
+# not raised for other files, because a larger setting slows every scan
+# (measured: about three times slower at 32 MiB).
 _DUCKDB_MAX_LINE_SIZE = 2 * MAX_RECORD_BYTES
+_DUCKDB_DEFAULT_IS_ENOUGH = 1024 * 1024
 
 # Fixed reading options for CSV files. auto_detect is off, so DuckDB guesses
 # nothing: not the delimiter, quoting, header, comment character or types.
@@ -57,13 +60,12 @@ _CSV_OPTIONS = ", ".join(
         "allow_quoted_nulls := false",
         "comment := ''",
         "null_padding := false",
-        f"max_line_size := {_DUCKDB_MAX_LINE_SIZE}",
     ]
 )
 CSV_RELATION = f"read_csv($rowgate_path, {_CSV_OPTIONS})"
-# The same rows without the blank lines at the end of a one-column file.
-# LIMIT keeps file order, because connect() preserves insertion order.
-CSV_RELATION_FIRST_ROWS = f"(SELECT * FROM {CSV_RELATION} LIMIT $rowgate_rows)"  # noqa: S608
+CSV_RELATION_LONG_RECORDS = (
+    f"read_csv($rowgate_path, {_CSV_OPTIONS}, max_line_size := {_DUCKDB_MAX_LINE_SIZE})"
+)
 PARQUET_RELATION = "read_parquet($rowgate_path)"
 
 DEFAULT_DELIMITER = ","
@@ -86,6 +88,7 @@ class CsvLayout:
     header: list[str]  # column names, with positional names for empty ones
     rows: int  # data rows, not counting blank lines at the end of the file
     trailing_blank_lines: int
+    longest_record_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -161,13 +164,14 @@ def open_dataset(rules_path: Path, source: Source) -> Dataset:
             layout = scan_csv(path, delimiter, shown)
             params["rowgate_columns"] = dict.fromkeys(layout.header, "VARCHAR")
             params["rowgate_delimiter"] = delimiter
-            relation = CSV_RELATION
+            long_records = layout.longest_record_bytes > _DUCKDB_DEFAULT_IS_ENOUGH
+            relation = CSV_RELATION_LONG_RECORDS if long_records else CSV_RELATION
         else:
             check_names(_parquet_names(connection, params, shown), shown)
             relation = PARQUET_RELATION
 
         columns = _describe(connection, relation, params, shown, source.file_format)
-        # relation is CSV_RELATION or PARQUET_RELATION: fixed text, values bound.
+        # relation is one of the *_RELATION constants: fixed text, values bound.
         count_sql = f"SELECT count(*) FROM {relation}"  # noqa: S608
         row_count = _scalar(connection, count_sql, params, shown, source.file_format)
         if not isinstance(row_count, int):
@@ -177,7 +181,9 @@ def open_dataset(rules_path: Path, source: Source) -> Dataset:
                 raise DataError(
                     f"DuckDB read different column names from {shown!r} than its header"
                 )
-            relation, row_count = _without_trailing_blank_lines(layout, row_count, params, shown)
+            relation, row_count = _without_trailing_blank_lines(
+                layout, relation, row_count, params, shown
+            )
         return Dataset(
             connection,
             relation=relation,
@@ -193,7 +199,7 @@ def open_dataset(rules_path: Path, source: Source) -> Dataset:
 
 
 def _without_trailing_blank_lines(
-    layout: CsvLayout, duckdb_rows: int, params: dict[str, object], shown: str
+    layout: CsvLayout, relation: str, duckdb_rows: int, params: dict[str, object], shown: str
 ) -> tuple[str, int]:
     """Check DuckDB's row count against RowGate's and leave out trailing blank lines.
 
@@ -209,9 +215,11 @@ def _without_trailing_blank_lines(
             "RowGate stops rather than check a partial file"
         )
     if not blank_rows:
-        return CSV_RELATION, layout.rows
+        return relation, layout.rows
     params["rowgate_rows"] = layout.rows
-    return CSV_RELATION_FIRST_ROWS, layout.rows
+    # LIMIT keeps file order, because connect() preserves insertion order.
+    # relation is one of the *_RELATION constants: fixed text, values bound.
+    return f"(SELECT * FROM {relation} LIMIT $rowgate_rows)", layout.rows  # noqa: S608
 
 
 def resolve_data_path(rules_path: Path, source: Source) -> Path:
@@ -292,6 +300,7 @@ class _PhysicalLines:
         self.line = 0  # physical lines read so far
         self.record_start = 1
         self.ending = ""  # line break of the last line read: \r\n, \n, \r or none
+        self.longest_record = 0  # bytes
         self._record_bytes = 0
 
     def __iter__(self) -> Self:
@@ -319,6 +328,7 @@ class _PhysicalLines:
     def next_record(self) -> None:
         """Call after csv.reader returns a record: the next one starts on the next line."""
         self.record_start = self.line + 1
+        self.longest_record = max(self.longest_record, self._record_bytes)
         self._record_bytes = 0
 
 
@@ -375,7 +385,7 @@ def _read_records(reader: Iterator[list[str]], lines: _PhysicalLines, shown: str
                 f"{_fields(width)}{hint}"
             )
         rows += 1
-    return CsvLayout(header, rows, trailing_blank_lines=len(blank_lines))
+    return CsvLayout(header, rows, len(blank_lines), lines.longest_record)
 
 
 def _fields(count: int) -> str:
