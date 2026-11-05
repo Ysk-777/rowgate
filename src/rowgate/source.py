@@ -305,7 +305,8 @@ def _read_records(
         raise DataError(f"line 1 of {shown!r} is blank; the first line must be the header")
     first_ending = lines.ending
     lines.next_record()
-    check_names(header, shown)
+    header, unnamed = positional_names(header)
+    check_names(header, shown, unnamed)
     width = len(header)
     looks_commented = header[0].startswith("#")
     rows = 0
@@ -343,8 +344,22 @@ def _fields(count: int) -> str:
     return f"{count} field" if count == 1 else f"{count} fields"
 
 
-def check_names(names: list[str], shown: str) -> None:
-    """Refuse empty column names and names that differ only in ASCII case."""
+def positional_names(header: list[str]) -> tuple[list[str], frozenset[int]]:
+    """Name each empty header field after its position: column_1, column_2, ...
+
+    pandas writes an empty first header name for the index column by default.
+    Returns the names and the (1-based) positions that had no name.
+    """
+    unnamed = frozenset(position for position, name in enumerate(header, 1) if name == "")
+    names = [name or f"column_{position}" for position, name in enumerate(header, 1)]
+    return names, unnamed
+
+
+def check_names(names: list[str], shown: str, unnamed: frozenset[int] = frozenset()) -> None:
+    """Refuse empty column names and names that differ only in ASCII case.
+
+    ``unnamed`` marks positions whose name RowGate made up, for the message.
+    """
     for position, name in enumerate(names, start=1):
         if name == "":
             raise DataError(
@@ -358,7 +373,8 @@ def check_names(names: list[str], shown: str) -> None:
     clashes = [group for group in positions.values() if len(group) > 1]
     if clashes:
         listed = ", ".join(
-            f"{names[position - 1]!r} (column {position})"
+            f"{names[position - 1]!r} (column {position}"
+            f"{', unnamed in the header' if position in unnamed else ''})"
             for group in clashes
             for position in group
         )

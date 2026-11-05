@@ -19,6 +19,7 @@ from rowgate.source import (
     _describe,
     _find_invalid_utf8,
     _metadata_error,
+    check_names,
     csv_read_error,
     open_dataset,
     query_error,
@@ -341,10 +342,40 @@ def test_names_differing_in_non_ascii_case_are_different_columns(tmp_path: Path)
         assert dataset.column_names == ["é", "É", "ß", "SS"]
 
 
-def test_an_empty_column_name_is_an_error(tmp_path: Path) -> None:
-    # DuckDB would invent a name such as "column0" or "C5" for it.
-    assert data_error(tmp_path, b",a,b\n0,1,2\n") == (
-        "column 1 of 'data.csv' has an empty name; give every column a name"
+def test_pandas_default_output_gets_a_name_for_its_index_column(tmp_path: Path) -> None:
+    # pandas' to_csv writes the index with an empty header name.
+    with open_csv(tmp_path, b",order_id,status\n0,1001,paid\n1,1002,new\n") as dataset:
+        assert dataset.column_names == ["column_1", "order_id", "status"]
+        assert rows(dataset) == [("0", "1001", "paid"), ("1", "1002", "new")]
+
+
+def test_every_empty_header_name_is_named_by_its_position(tmp_path: Path) -> None:
+    with open_csv(tmp_path, b"a,,b,\n1,2,3,4\n") as dataset:
+        assert dataset.column_names == ["a", "column_2", "b", "column_4"]
+
+
+@pytest.mark.parametrize(
+    ("header", "listed"),
+    [
+        (b",column_1", "'column_1' (column 1, unnamed in the header), 'column_1' (column 2)"),
+        (b"COLUMN_2,", "'COLUMN_2' (column 1), 'column_2' (column 2, unnamed in the header)"),
+    ],
+)
+def test_a_positional_name_that_clashes_is_an_error(
+    tmp_path: Path, header: bytes, listed: str
+) -> None:
+    assert data_error(tmp_path, header + b"\n1,2\n") == (
+        f"'data.csv' has duplicate column names (compared ignoring case): {listed}; give every "
+        "column a different name"
+    )
+
+
+def test_an_empty_parquet_column_name_is_an_error() -> None:
+    # Parquet names come from the file and are not renamed by RowGate.
+    with pytest.raises(DataError) as excinfo:
+        check_names(["", "a"], "data.parquet")
+    assert excinfo.value.message == (
+        "column 1 of 'data.parquet' has an empty name; give every column a name"
     )
 
 

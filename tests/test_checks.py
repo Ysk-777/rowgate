@@ -325,3 +325,9 @@ def _write_rules(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def test_checks_can_use_the_positional_name_of_an_unnamed_column(tmp_path: Path) -> None:
+    data = b",order_id\n0,1001\n1,1002\n1,1003\n"
+    result = only(run(tmp_path, "  - {rule: unique, column: column_1}\n", data))
+    assert (result.column, result.failing_rows) == ("column_1", 2)

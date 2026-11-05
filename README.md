@@ -123,7 +123,12 @@ Parquet columns keep the types stored in the file (`INTEGER`, `DOUBLE`,
   an error (exit 2), because DuckDB treats them as the same name. Names that
   differ in non-ASCII case, such as `é` and `É`, are different columns, as in
   DuckDB.
-- An empty column name is an error. DuckDB would invent a name for it.
+- An empty column name in a CSV header gets a name from its position:
+  `column_1` for the first column, `column_2` for the second, and so on. This
+  is what pandas writes for its index column by default (`,a,b`). If that name
+  is already used by another column (ignoring ASCII case), the header is
+  ambiguous and RowGate stops with exit 2. In a Parquet file, an empty column
+  name is an error.
 - A check on a column the file does not have is an error (exit 2) that lists
   the columns the file does have. `columns_exist` is the rule for asserting
   that columns are present; it fails like any other check.
