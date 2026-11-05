@@ -52,8 +52,9 @@ def test_extensions_cannot_be_installed_or_loaded(
 
 
 def test_configuration_is_locked(connection: duckdb.DuckDBPyConnection) -> None:
-    with pytest.raises(duckdb.InvalidInputException, match="locked"):
+    with pytest.raises(duckdb.InvalidInputException):
         connection.execute("SET enable_external_access = true")
+    assert setting(connection, "enable_external_access") is False
 
 
 def test_settings(connection: duckdb.DuckDBPyConnection) -> None:
@@ -65,11 +66,17 @@ def test_settings(connection: duckdb.DuckDBPyConnection) -> None:
     assert setting(connection, "lock_configuration") is True
 
 
-def test_error_text_drops_the_error_class(connection: duckdb.DuckDBPyConnection) -> None:
-    with pytest.raises(duckdb.Error) as excinfo:
-        connection.execute("SELECT regexp_full_match('', 'a(b')")
-    assert str(excinfo.value).startswith("Invalid Input Error: ")
-    assert error_text(excinfo.value) == "missing ): a(b"
+@pytest.mark.parametrize(
+    ("raw", "cleaned"),
+    [
+        ("Invalid Input Error: missing ): a(b", "missing ): a(b"),
+        ("Conversion Error: could not convert", "could not convert"),
+        ("no class prefix here", "no class prefix here"),
+        ("Binder Error: first: Error: second", "first: Error: second"),
+    ],
+)
+def test_error_text_drops_only_the_leading_error_class(raw: str, cleaned: str) -> None:
+    assert error_text(duckdb.InvalidInputException(raw)) == cleaned
 
 
 @pytest.mark.parametrize(
@@ -81,20 +88,22 @@ def test_valid_patterns(pattern: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("pattern", "problem"),
+    "pattern",
     [
-        ("a(b", "missing ): a(b"),
-        ("(?=a)", "invalid perl operator: (?="),
-        (r"(a)\1", r"invalid escape sequence: \1"),
-        ("[z-a]", "invalid character class range: z-a"),
-        ("a{1001}", "invalid repetition size: {1001}"),
-        ("*a", "no argument for repetition operator: *"),
-        ("x**", "bad repetition operator: **"),
-        ("\\", "trailing \\"),
+        "a(b",  # unbalanced group
+        "(?=a)",  # lookahead: Python's re accepts it, RE2 does not
+        r"(a)\1",  # backreference: Python's re accepts it, RE2 does not
+        "[z-a]",  # reversed range
+        "a{1001}",  # repetition over RE2's limit
+        "*a",  # nothing to repeat
+        "x**",  # doubled repetition
+        "\\",  # trailing backslash
     ],
 )
-def test_invalid_patterns(pattern: str, problem: str) -> None:
-    assert regex_error(pattern) == problem
+def test_invalid_patterns(pattern: str) -> None:
+    problem = regex_error(pattern)
+    assert problem  # RE2's reason; its wording is not RowGate's to pin
+    assert not problem.startswith("Invalid Input Error")
 
 
 def test_connection_is_closed_if_setup_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,7 +128,7 @@ def test_shared_pattern_connection_can_be_released() -> None:
     _close_pattern_connection()
     assert _pattern_connection.cache_info().currsize == 0
     _close_pattern_connection()  # releasing twice is harmless
-    assert regex_error("a(") == "missing ): a("
+    assert regex_error("a(") is not None  # a fresh connection is opened on demand
 
 
 def test_no_leak_warnings_when_an_error_outlives_the_program() -> None:

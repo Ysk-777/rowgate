@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import difflib
+import types
+import typing
 from pathlib import Path
 from typing import Any
 
@@ -187,7 +189,7 @@ def _message(error: ErrorDetails, model: type[BaseModel] | None, field: str | No
     if kind == "literal_error":
         if model is RulesFile and field == "version":
             return f"unsupported version; expected 1, got {got}"
-        return f"expected {ctx['expected']}, got {got}"
+        return f"expected {_choices(model, field)}, got {got}"
     if kind == "value_error":
         return str(ctx["error"])
     simple = {
@@ -199,6 +201,26 @@ def _message(error: ErrorDetails, model: type[BaseModel] | None, field: str | No
         "greater_than_equal": f"must be {ctx.get('ge')} or more, got {got}",
     }
     return simple.get(kind, error["msg"])
+
+
+def _choices(model: type[BaseModel] | None, field: str | None) -> str:
+    """The allowed values of a Literal field, written as 'a' or 'b'."""
+    values: list[object] = []
+    if model is not None and field in model.model_fields:
+        values = _literal_values(model.model_fields[field].annotation)
+    quoted = [repr(value) for value in values] or ["an allowed value"]
+    if len(quoted) == 1:
+        return quoted[0]
+    return ", ".join(quoted[:-1]) + " or " + quoted[-1]
+
+
+def _literal_values(annotation: object) -> list[object]:
+    origin = typing.get_origin(annotation)
+    if origin is typing.Literal:
+        return list(typing.get_args(annotation))
+    if origin in (typing.Union, types.UnionType):
+        return [value for arg in typing.get_args(annotation) for value in _literal_values(arg)]
+    return []
 
 
 def _unknown_field(model: type[BaseModel] | None, field: str | None) -> str:

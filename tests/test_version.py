@@ -25,7 +25,7 @@ def test_package_metadata_matches_module_version() -> None:
 def test_no_arguments_shows_help_and_exits_with_usage_code() -> None:
     result = CliRunner().invoke(app, [])
     assert result.exit_code == 2
-    assert "Usage" in result.output
+    assert "validate" in result.output  # the help lists RowGate's commands
 
 
 def test_unknown_option_is_a_usage_error() -> None:

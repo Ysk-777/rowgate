@@ -9,6 +9,7 @@ import yaml
 
 from rowgate.errors import RulesError
 from rowgate.loader import _describe_marked_error, parse_rules_yaml, read_rules_text
+from support import yaml_position
 
 
 def yaml_problems(text: str) -> list[str]:
@@ -16,6 +17,12 @@ def yaml_problems(text: str) -> list[str]:
         parse_rules_yaml(text, "rules.yaml")
     assert excinfo.value.path == "rules.yaml"
     return excinfo.value.problems
+
+
+def only_problem(text: str) -> str:
+    problems = yaml_problems(text)
+    assert len(problems) == 1, problems
+    return problems[0]
 
 
 def test_missing_file(tmp_path: Path) -> None:
@@ -73,16 +80,11 @@ def test_empty_document(text: str) -> None:
 
 
 def test_syntax_error_reports_line_and_column() -> None:
-    assert yaml_problems("version: 1\nsource: [a, b\nchecks: []\n") == [
-        "invalid YAML at line 3, column 7: expected ',' or ']', but got ':'"
-    ]
+    assert yaml_position(only_problem("version: 1\nsource: [a, b\nchecks: []\n")) == (3, 7)
 
 
 def test_tab_indentation_is_a_syntax_error() -> None:
-    problems = yaml_problems("source:\n\tpath: a.csv\n")
-    assert problems == [
-        "invalid YAML at line 2, column 1: found character '\\t' that cannot start any token"
-    ]
+    assert yaml_position(only_problem("source:\n\tpath: a.csv\n")) == (2, 1)
 
 
 def test_duplicate_top_level_key() -> None:
@@ -106,31 +108,23 @@ def test_merge_keys_are_not_duplicates() -> None:
 
 
 def test_unhashable_key() -> None:
-    assert yaml_problems("? [a, b]\n: 1\n") == [
-        "invalid YAML at line 1, column 3: found unhashable key"
-    ]
+    assert yaml_position(only_problem("? [a, b]\n: 1\n")) == (1, 3)
 
 
 def test_multiple_documents() -> None:
-    assert yaml_problems("version: 1\n---\nversion: 1\n") == [
-        "invalid YAML at line 2, column 1: but found another document"
-    ]
+    assert yaml_position(only_problem("version: 1\n---\nversion: 1\n")) == (2, 1)
 
 
-def test_python_object_tags_are_refused() -> None:
+def test_python_object_tags_are_refused(tmp_path: Path) -> None:
     # The safe loader never builds Python objects or calls functions.
-    problems = yaml_problems("checks: !!python/object/apply:os.system ['echo unsafe']\n")
-    assert problems == [
-        "invalid YAML at line 1, column 9: could not determine a constructor for the tag "
-        "'tag:yaml.org,2002:python/object/apply:os.system'"
-    ]
+    marker = tmp_path / "ran"
+    text = f"checks: !!python/object/apply:os.system ['touch {marker}']\n"
+    assert yaml_position(only_problem(text)) == (1, 9)
+    assert not marker.exists()
 
 
 def test_control_characters_are_refused() -> None:
-    assert yaml_problems("version: 1\x00\n") == [
-        "invalid YAML: unacceptable character #x0000: special characters are not allowed "
-        'in "<unicode string>", position 10'
-    ]
+    assert only_problem("version: 1\x00\n").startswith("invalid YAML: ")
 
 
 def test_yaml_error_without_position_is_still_reported() -> None:
@@ -139,38 +133,36 @@ def test_yaml_error_without_position_is_still_reported() -> None:
 
 
 @pytest.mark.parametrize(
-    ("text", "problem"),
+    ("text", "prefix"),
     [
         (
             "a: 2024-02-30\n",
-            "invalid YAML at line 1, column 4: cannot read the value '2024-02-30' as timestamp: "
-            "day is out of range for month",
+            "invalid YAML at line 1, column 4: cannot read the value '2024-02-30' as timestamp: ",
         ),
         (
             "a: 2024-01-01 25:00:00\n",
             "invalid YAML at line 1, column 4: cannot read the value '2024-01-01 25:00:00' "
-            "as timestamp: hour must be in 0..23",
+            "as timestamp: ",
         ),
         (
             "a: !!int abc\n",
-            "invalid YAML at line 1, column 4: cannot read the value 'abc' as int: "
-            "invalid literal for int() with base 10: 'abc'",
+            "invalid YAML at line 1, column 4: cannot read the value 'abc' as int: ",
         ),
         (
             "a: !!bool maybe\n",
-            "invalid YAML at line 1, column 4: cannot read the value 'maybe' as bool: 'maybe'",
+            "invalid YAML at line 1, column 4: cannot read the value 'maybe' as bool: ",
         ),
         (
             "a: !!float x\n",
-            "invalid YAML at line 1, column 4: cannot read the value 'x' as float: "
-            "could not convert string to float: 'x'",
+            "invalid YAML at line 1, column 4: cannot read the value 'x' as float: ",
         ),
         (
             "a:\n  - !!timestamp nope\n",
-            "invalid YAML at line 2, column 5: cannot read the value 'nope' as timestamp: "
-            "'NoneType' object has no attribute 'groupdict'",
+            "invalid YAML at line 2, column 5: cannot read the value 'nope' as timestamp: ",
         ),
     ],
 )
-def test_scalars_that_cannot_be_built_are_yaml_errors(text: str, problem: str) -> None:
-    assert yaml_problems(text) == [problem]
+def test_scalars_that_cannot_be_built_are_yaml_errors(text: str, prefix: str) -> None:
+    problem = only_problem(text)
+    assert problem.startswith(prefix)
+    assert len(problem) > len(prefix)  # followed by the underlying reason

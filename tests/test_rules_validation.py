@@ -6,9 +6,10 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 
 from rowgate.errors import RulesError
-from rowgate.loader import _unknown_field, load_rules
+from rowgate.loader import _choices, _unknown_field, load_rules
 from rowgate.rules import (
     ColumnsExist,
     InSet,
@@ -21,6 +22,7 @@ from rowgate.rules import (
     Unique,
     _greater,
 )
+from support import split_problem
 
 KNOWN_RULES = "columns_exist, row_count, not_null, unique, in_set, range, regex"
 
@@ -701,19 +703,17 @@ def test_bounds_of_different_kinds_are_never_compared() -> None:
         _greater(1, date(2024, 1, 1))
 
 
-@pytest.mark.parametrize(
-    ("pattern", "problem"),
-    [
-        ("'a(b'", "missing ): a(b"),
-        ("'(?=[A-Z])'", "invalid perl operator: (?="),
-        ("'(a)\\1'", "invalid escape sequence: \\1"),
-    ],
-)
-def test_invalid_regex_is_a_rules_error(tmp_path: Path, pattern: str, problem: str) -> None:
+REGEX_PREFIX = "invalid regular expression: "
+
+
+@pytest.mark.parametrize("pattern", ["'a(b'", "'(?=[A-Z])'", "'(a)\\1'"])
+def test_invalid_regex_is_a_rules_error(tmp_path: Path, pattern: str) -> None:
     text = rules_text(f"{{rule: regex, column: sku, pattern: {pattern}}}")
-    assert problems(tmp_path, text) == [
-        f"check 1 (regex), field 'pattern': invalid regular expression: {problem}"
-    ]
+    [problem] = problems(tmp_path, text)
+    where, message = split_problem(problem)
+    assert where == "check 1 (regex), field 'pattern'"
+    assert message.startswith(REGEX_PREFIX)
+    assert len(message) > len(REGEX_PREFIX)  # followed by RE2's reason
 
 
 def test_every_invalid_regex_is_reported(tmp_path: Path) -> None:
@@ -722,8 +722,25 @@ def test_every_invalid_regex_is_reported(tmp_path: Path) -> None:
         "{rule: regex, column: b, pattern: '[z-a]'}",
         "{rule: regex, column: c, pattern: 'x**'}",
     )
-    assert problems(tmp_path, text) == [
-        "check 2 (regex), field 'pattern': invalid regular expression: "
-        "invalid character class range: z-a",
-        "check 3 (regex), field 'pattern': invalid regular expression: bad repetition operator: **",
+    found = [split_problem(problem) for problem in problems(tmp_path, text)]
+    assert [where for where, _ in found] == [
+        "check 2 (regex), field 'pattern'",
+        "check 3 (regex), field 'pattern'",
     ]
+    assert all(message.startswith(REGEX_PREFIX) for _, message in found)
+
+
+@pytest.mark.parametrize(
+    ("model", "field", "expected"),
+    [
+        (NotNull, "severity", "'error' or 'warn'"),
+        (Source, "format", "'csv' or 'parquet'"),
+        (RulesFile, "version", "1"),
+        (NotNull, "column", "an allowed value"),
+        (None, "severity", "an allowed value"),
+    ],
+)
+def test_allowed_values_are_written_by_rowgate(
+    model: type[BaseModel] | None, field: str, expected: str
+) -> None:
+    assert _choices(model, field) == expected

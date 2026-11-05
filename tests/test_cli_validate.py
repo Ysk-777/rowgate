@@ -73,12 +73,13 @@ def test_one_problem(tmp_path: Path) -> None:
 
 def test_invalid_regex_is_caught_by_validate(tmp_path: Path) -> None:
     rules = write(tmp_path, VALID.replace('"[A-Z]', '"([A-Z]'))
-    code, _, err = run("validate", str(rules))
-    assert code == 2
-    assert err == (
+    code, out, err = run("validate", str(rules))
+    assert (code, out) == (2, "")
+    # The reason after the prefix is RE2's wording, so it is not pinned here.
+    assert err.startswith(
         f"error: {rules}: check 2 (regex), field 'pattern': invalid regular expression: "
-        "missing ): ([A-Z]{3}-[0-9]{4}\n"
     )
+    assert err.count("\n") == 1
 
 
 def test_url_source_is_rejected(tmp_path: Path) -> None:
@@ -104,9 +105,9 @@ def test_yaml_syntax_error(tmp_path: Path) -> None:
 
 
 def test_missing_argument_is_a_usage_error() -> None:
-    code, _, err = run("validate")
-    assert code == 2
-    assert "Missing argument" in err
+    code, out, err = run("validate")
+    assert (code, out) == (2, "")
+    assert err  # click explains the usage error in its own words
 
 
 UNICODE_FIELD = (
