@@ -5,12 +5,14 @@ from __future__ import annotations
 import difflib
 import types
 import typing
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel, ValidationError
 from pydantic_core import ErrorDetails
+from yaml.composer import ComposerError
 from yaml.constructor import ConstructorError
 
 from rowgate.errors import RulesError
@@ -18,9 +20,13 @@ from rowgate.rules import RULE_MODELS, RulesFile, Source, describe_value
 
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 
+# Rules files need about five levels; anything far deeper is a mistake or an
+# attack, and would otherwise exhaust Python's recursion limit.
+MAX_NESTING = 50
+
 
 class _RulesLoader(yaml.SafeLoader):
-    """The PyYAML safe loader with two fixes for rules files.
+    """The PyYAML safe loader with fixes for rules files.
 
     Duplicate mapping keys are an error. Plain PyYAML keeps the last value
     without a word, which hides typos such as writing ``column:`` twice.
@@ -28,7 +34,28 @@ class _RulesLoader(yaml.SafeLoader):
     A scalar that cannot be built, such as the date ``2024-02-30`` or
     ``!!int abc``, becomes a YAML error with its position. Plain PyYAML lets
     a bare ValueError, KeyError or AttributeError escape.
+
+    Nesting deeper than MAX_NESTING is an error. Plain PyYAML recurses once
+    per level and crashes with RecursionError.
     """
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._nesting = 0
+
+    def compose_node(self, parent: yaml.Node | None, index: int) -> yaml.Node | None:
+        self._nesting += 1
+        try:
+            if self._nesting > MAX_NESTING:
+                raise ComposerError(
+                    None,
+                    None,
+                    f"the YAML is nested more than {MAX_NESTING} levels deep",
+                    parent.start_mark if parent is not None else None,
+                )
+            return super().compose_node(parent, index)
+        finally:
+            self._nesting -= 1
 
     def construct_object(self, node: yaml.Node, deep: bool = False) -> Any:
         try:
@@ -43,7 +70,12 @@ class _RulesLoader(yaml.SafeLoader):
             ) from None
 
 
-def _construct_mapping(loader: _RulesLoader, node: yaml.MappingNode) -> dict[Any, Any]:
+def _construct_mapping(loader: _RulesLoader, node: yaml.MappingNode) -> Iterator[dict[Any, Any]]:
+    # A generator, like PyYAML's own: the empty dict is handed out first and
+    # filled later, so a mapping that refers to itself through an alias can be
+    # built (and then rejected with a clear message) instead of failing.
+    data: dict[Any, Any] = {}
+    yield data
     seen: set[object] = set()
     for key_node, _value_node in node.value:
         if key_node.tag == _MERGE_TAG:
@@ -62,7 +94,7 @@ def _construct_mapping(loader: _RulesLoader, node: yaml.MappingNode) -> dict[Any
                 key_node.start_mark,
             )
         seen.add(key)
-    return loader.construct_mapping(node)
+    data.update(loader.construct_mapping(node))
 
 
 _RulesLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
@@ -120,10 +152,59 @@ def load_rules(path: Path) -> RulesFile:
     """Read, parse and validate a rules file. Raises RulesError listing every problem."""
     shown = str(path)
     data = parse_rules_yaml(read_rules_text(path), shown)
+    problems = find_structure_problems(data)
+    if problems:
+        raise RulesError(shown, problems)
     try:
         return RulesFile.model_validate(data)
     except ValidationError as exc:
         raise RulesError(shown, describe_validation_errors(exc)) from None
+
+
+def find_structure_problems(data: object) -> list[str]:
+    """Find lists and mappings that contain themselves through an alias.
+
+    Walks the data once, iteratively (no recursion), skipping containers it
+    has already seen so shared aliases cannot make the walk explode.
+    """
+    problems: list[str] = []
+    on_path: set[int] = set()
+    finished: set[int] = set()
+    stack: list[tuple[bool, object, tuple[int | str, ...]]] = [(False, data, ())]
+    while stack:
+        leaving, value, path = stack.pop()
+        if not isinstance(value, list | dict):
+            continue
+        ident = id(value)
+        if leaving:
+            on_path.discard(ident)
+            finished.add(ident)
+            continue
+        if ident in on_path:
+            where = _raw_location(data, path)
+            message = "an alias refers to the list or mapping that contains it"
+            problems.append(f"{where}: {message}" if where else message)
+            continue
+        if ident in finished:
+            continue
+        on_path.add(ident)
+        stack.append((True, value, path))
+        children = value.items() if isinstance(value, dict) else enumerate(value)
+        for key, child in reversed(list(children)):
+            stack.append((False, child, (*path, key if isinstance(key, int | str) else str(key))))
+    return problems
+
+
+def _raw_location(data: object, path: tuple[int | str, ...]) -> str:
+    """Describe a path in the raw YAML data the way validation errors do."""
+    loc = path
+    if len(path) >= 2 and path[0] == "checks" and isinstance(path[1], int):
+        checks = data.get("checks") if isinstance(data, dict) else None
+        check = checks[path[1]] if isinstance(checks, list) else None
+        rule = check.get("rule") if isinstance(check, dict) else None
+        if isinstance(rule, str) and rule in RULE_MODELS:
+            loc = (*path[:2], rule, *path[2:])
+    return _locate(loc)[0]
 
 
 def describe_validation_errors(exc: ValidationError) -> list[str]:

@@ -208,3 +208,18 @@ def test_main_leaves_unusual_streams_alone(
         cli.main()
     assert excinfo.value.code == 0
     assert out.getvalue() == f"rowgate {__version__}\n"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "version: 1\nsource: {path: a.csv}\nchecks: &a [*a]\n",
+        "version: 1\nsource: {path: a.csv}\nchecks: " + "[" * 5000 + "]" * 5000 + "\n",
+    ],
+    ids=["recursive-alias", "deep-nesting"],
+)
+def test_hostile_yaml_is_a_rules_error_not_a_crash(tmp_path: Path, text: str) -> None:
+    code, out, err = run("validate", str(write(tmp_path, text)))
+    assert (code, out) == (2, "")
+    assert err.startswith(f"error: {tmp_path / 'rules.yaml'}: ")
+    assert "internal error" not in err

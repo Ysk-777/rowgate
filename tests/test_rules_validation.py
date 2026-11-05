@@ -744,3 +744,63 @@ def test_allowed_values_are_written_by_rowgate(
     model: type[BaseModel] | None, field: str, expected: str
 ) -> None:
     assert _choices(model, field) == expected
+
+
+# --- aliases ------------------------------------------------------------------------
+
+SELF_REFERENCE = "an alias refers to the list or mapping that contains it"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "version: 1\nsource: {path: a.csv}\nchecks: &a [*a]\n",
+            f"check 1: {SELF_REFERENCE}",
+        ),
+        (
+            "version: 1\nsource: {path: a.csv}\nchecks:\n"
+            "  - &c {rule: in_set, column: s, values: [ok, *c]}\n",
+            f"check 1 (in_set), field 'values', item 2: {SELF_REFERENCE}",
+        ),
+        (
+            "version: 1\nsource: &s {path: a.csv, again: *s}\n"
+            "checks: [{rule: unique, column: id}]\n",
+            f"field 'source.again': {SELF_REFERENCE}",
+        ),
+        ("&r {version: 1, again: *r}\n", f"field 'again': {SELF_REFERENCE}"),
+        ("&r [*r]\n", f"field '0': {SELF_REFERENCE}"),
+    ],
+)
+def test_recursive_aliases_are_rules_errors(tmp_path: Path, text: str, expected: str) -> None:
+    assert problems(tmp_path, text) == [expected]
+
+
+def test_shared_aliases_are_fine(tmp_path: Path) -> None:
+    text = rules_text(
+        "{rule: in_set, column: s, values: &v [new, paid]}",
+        "{rule: in_set, column: t, values: *v}",
+    )
+    in_sets = [check for check in load(tmp_path, text).checks if isinstance(check, InSet)]
+    assert [check.values for check in in_sets] == [["new", "paid"], ["new", "paid"]]
+
+
+def test_alias_bomb_is_checked_without_expanding_it(tmp_path: Path) -> None:
+    # 10 levels of 10 aliases each would be 10**10 leaves if expanded. The
+    # structure walk visits each list once, so this finishes immediately.
+    lines = ["version: 1", "source: {path: a.csv}", "checks:"]
+    lines.append("  - {rule: in_set, column: s, values: &a0 [x, x, x, x, x, x, x, x, x, x]}")
+    for level in range(1, 10):
+        refs = ", ".join([f"*a{level - 1}"] * 10)
+        lines.append(f"  - {{rule: in_set, column: s{level}, values: &a{level} [{refs}]}}")
+    found = problems(tmp_path, "\n".join(lines) + "\n")
+    assert len(found) == 9 * 10  # every item of checks 2-10 is a list, not a value
+    assert split_problem(found[0])[0] == "check 2 (in_set), field 'values', item 1"
+
+
+def test_long_alias_chains_do_not_exhaust_the_stack(tmp_path: Path) -> None:
+    lines = ["version: 1", "source: {path: a.csv}", "checks:", "  - &c0 [x]"]
+    lines += [f"  - &c{n} [*c{n - 1}]" for n in range(1, 2000)]
+    found = problems(tmp_path, "\n".join(lines) + "\n")
+    assert len(found) == 2000
+    assert found[0] == "check 1: expected a mapping of fields, got a list"

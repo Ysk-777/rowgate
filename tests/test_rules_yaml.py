@@ -8,7 +8,12 @@ import pytest
 import yaml
 
 from rowgate.errors import RulesError
-from rowgate.loader import _describe_marked_error, parse_rules_yaml, read_rules_text
+from rowgate.loader import (
+    MAX_NESTING,
+    _describe_marked_error,
+    parse_rules_yaml,
+    read_rules_text,
+)
 from support import yaml_position
 
 
@@ -166,3 +171,36 @@ def test_scalars_that_cannot_be_built_are_yaml_errors(text: str, prefix: str) ->
     problem = only_problem(text)
     assert problem.startswith(prefix)
     assert len(problem) > len(prefix)  # followed by the underlying reason
+
+
+def nested_lists(depth: int) -> str:
+    return "a: " + "[" * depth + "]" * depth + "\n"
+
+
+def test_nesting_up_to_the_limit_is_accepted() -> None:
+    # "a:" holds the top-level mapping, so MAX_NESTING - 1 lists fit inside it.
+    data = parse_rules_yaml(nested_lists(MAX_NESTING - 1), "rules.yaml")
+    assert isinstance(data, dict)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        nested_lists(MAX_NESTING),
+        nested_lists(10_000),  # plain PyYAML raises RecursionError here
+        "".join("  " * depth + f"k{depth}:\n" for depth in range(400)),
+        "".join("  " * depth + "-\n" for depth in range(400)),
+    ],
+    ids=["one-past-limit", "flow-10000", "block-mappings-400", "block-lists-400"],
+)
+def test_deep_nesting_is_a_rules_error(text: str) -> None:
+    problem = only_problem(text)
+    yaml_position(problem)  # the problem has a line and column
+    assert problem.endswith(f": the YAML is nested more than {MAX_NESTING} levels deep")
+
+
+def test_a_mapping_that_contains_itself_can_be_parsed() -> None:
+    # It is rejected later, with the check number, by find_structure_problems.
+    data = parse_rules_yaml("source: &s {path: a.csv, again: *s}\n", "rules.yaml")
+    assert isinstance(data, dict)
+    assert data["source"]["again"] is data["source"]
