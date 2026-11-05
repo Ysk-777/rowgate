@@ -252,3 +252,21 @@ def test_a_path_with_control_characters_is_printed_escaped(tmp_path: Path) -> No
     assert code == 0
     assert "\x1b" not in out
     assert out.startswith("Source: 'x\\ty\\x1b.csv' (csv, 1 row, 1 column)\n")
+
+
+@pytest.mark.parametrize(
+    "bad_line",
+    [b'2,"private-value"x,1', b"2,private-value" + b"x" * 17_000_000 + b",1"],
+    ids=["stray-quote", "record-over-16-mib"],
+)
+def test_unreadable_lines_are_reported_without_their_content(
+    tmp_path: Path, bad_line: bytes
+) -> None:
+    data = b"order_id,status,amount\n1,paid,10\n" + bad_line + b"\n"
+    completed = run_process("check", str(project(tmp_path, data=data)))
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert completed.stderr.startswith("error: line 3 of 'orders.csv' ")
+    assert "private-value" not in completed.stderr
+    assert "Possible fixes" not in completed.stderr
+    assert len(completed.stderr) < 300

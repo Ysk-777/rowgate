@@ -63,7 +63,10 @@ DuckDB fixed options, with DuckDB's automatic detection switched off:
   one column named like `id;name`.
 - Quoting follows RFC 4180: fields may be wrapped in `"`, and `""` inside a
   quoted field is one `"`. Quoted fields may contain delimiters and line
-  breaks.
+  breaks. After a closing quote only the delimiter or a line break may follow,
+  so `2,"ok"x` and `2,"ok" ` are errors that name the line. A `"` in the
+  middle of an unquoted field, as in `a"b`, is kept as text. DuckDB drops
+  spaces around a quoted field: `1, "a"` reads as `a`.
 - The first line is always the header. Lines starting with `#` are data, not
   comments. A comment line above the header becomes the header, which then
   fails with a clear error.
@@ -72,13 +75,20 @@ DuckDB fixed options, with DuckDB's automatic detection switched off:
 - The file must be UTF-8. A byte-order mark is allowed and is not part of the
   first column name. Invalid UTF-8 is an error that names the line and byte
   offset.
-- Line endings may be `\n`, `\r\n` or `\r`.
+- Line endings may be `\n`, `\r\n` or `\r`, but one file must use only one
+  kind: DuckDB cannot read a file that mixes them, so RowGate stops with an
+  error naming the first line that differs. A line break inside quotes is part
+  of the value and does not count.
 - One record (a line, or several lines inside quotes) may be up to 16 MiB,
   counted in bytes including its line break. A longer record is an error that
   names its line. Long fields are fine within that limit.
 - Before checking, RowGate counts the data rows itself and makes sure DuckDB
   read the same number. If they differ, it stops with exit 2 rather than
   check part of the file.
+- Error messages name the file and line but never print the line itself, so
+  data values do not leak into logs. When DuckDB itself rejects a line,
+  RowGate reports the line number and leaves out DuckDB's explanation, which
+  can quote the row.
 
 Every CSV value is read as text, exactly as written:
 

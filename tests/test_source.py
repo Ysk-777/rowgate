@@ -13,7 +13,16 @@ from rowgate import database
 from rowgate import source as source_module
 from rowgate.errors import DataError
 from rowgate.rules import Source
-from rowgate.source import Column, Dataset, _describe, _find_invalid_utf8, open_dataset
+from rowgate.source import (
+    Column,
+    Dataset,
+    _describe,
+    _find_invalid_utf8,
+    _metadata_error,
+    csv_read_error,
+    open_dataset,
+    query_error,
+)
 from rowgate.sql import quote_identifier, text_as_date, text_as_number
 
 
@@ -110,9 +119,10 @@ def test_a_quote_inside_an_unquoted_field_is_kept(tmp_path: Path) -> None:
         assert rows(dataset) == [("1", 'a"b')]
 
 
-def test_an_unterminated_quote_is_an_error(tmp_path: Path) -> None:
-    with pytest.raises(DataError):
-        open_csv(tmp_path, b'id,name\n1,a\n2,"unterminated\n')
+def test_an_unterminated_quote_is_an_error_at_the_line_it_starts(tmp_path: Path) -> None:
+    message = data_error(tmp_path, b'id,name\n1,a\n2,"unterminated\n3,c\n')
+    assert message.startswith("line 3 of 'data.csv' is not valid CSV (")
+    assert message.endswith(QUOTE_HINT)
 
 
 def test_a_multi_line_header_is_one_record(tmp_path: Path) -> None:
@@ -569,7 +579,9 @@ def test_csv_errors_from_python_are_reported(
         raise csv.Error("something odd")
 
     monkeypatch.setattr(csv, "reader", broken_reader)
-    assert data_error(tmp_path, b"id\n1\n") == "'data.csv' cannot be read as CSV: something odd"
+    assert data_error(tmp_path, b"id\n1\n").startswith(
+        "line 1 of 'data.csv' is not valid CSV (something odd); check the quotes"
+    )
 
 
 def test_the_connection_is_closed_when_opening_fails(
@@ -614,8 +626,11 @@ def test_a_schema_that_cannot_be_read_is_a_data_error(tmp_path: Path) -> None:
     params: dict[str, object] = {"rowgate_path": str(tmp_path / "data.csv")}
     with pytest.raises(DataError) as excinfo:
         # A connection that may not read the file at all.
-        _describe(database.connect(), source_module.PARQUET_RELATION, params, "data.csv")
-    assert excinfo.value.message.startswith("cannot read 'data.csv': ")
+        _describe(database.connect(), source_module.CSV_RELATION, params, "data.csv", "csv")
+    assert excinfo.value.message == (
+        "DuckDB could not read 'data.csv' as CSV; RowGate does not show DuckDB's explanation, "
+        "because it can include data values"
+    )
 
 
 def test_columns_are_looked_up_by_exact_name(tmp_path: Path) -> None:
@@ -699,3 +714,130 @@ def test_one_huge_line_is_refused_without_reading_it_whole(
 def test_the_header_is_also_limited(tmp_path: Path, small_limit: int) -> None:
     message = data_error(tmp_path, b"id," + b"n" * 200 + b"\n1,2\n")
     assert message.startswith("line 1 of 'data.csv' is longer than 100 bytes")
+
+
+# --- CSV errors are RowGate's words, never DuckDB's or the row's ----------------------------------
+
+QUOTE_HINT = (
+    "check the quotes on that line: a quoted field must be closed, and only the delimiter "
+    "or a line break may follow its closing quote"
+)
+NOT_SHOWN = "RowGate does not show DuckDB's explanation, because it can include data values"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [b'2,"ok"x', b'2,"ok" ', b'2,"o"k"', b'2,"ok""'],
+    ids=["text-after-quote", "space-after-quote", "quote-in-quoted-field", "unclosed-escaped"],
+)
+def test_stray_quotes_are_an_error_naming_the_line(tmp_path: Path, line: bytes) -> None:
+    message = data_error(tmp_path, b"id,name\n1,a\n" + line + b"\n3,c\n")
+    # Python's csv module explains the problem in its own words between the
+    # parentheses; the line number and the hint are RowGate's.
+    assert message.startswith("line 3 of 'data.csv' is not valid CSV (")
+    assert message.endswith(QUOTE_HINT)
+    assert "ok" not in message  # no data values
+
+
+def test_a_quote_inside_an_unquoted_field_is_still_fine(tmp_path: Path) -> None:
+    with open_csv(tmp_path, b'id,name\n1,a"b\n2,"x""y"\n') as dataset:
+        assert rows(dataset) == [("1", 'a"b'), ("2", 'x"y')]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (
+            b"id,name\n1,a\r\n2,b\n",
+            "line 2 of 'data.csv' ends with CRLF (\\r\\n), but line 1 ends with LF (\\n)",
+        ),
+        (
+            b"id,name\r\n1,a\r\n2,b\n3,c\r\n",
+            "line 3 of 'data.csv' ends with LF (\\n), but line 1 ends with CRLF (\\r\\n)",
+        ),
+        (
+            b"id,name\r1,a\n2,b\n",
+            "line 2 of 'data.csv' ends with LF (\\n), but line 1 ends with CR (\\r)",
+        ),
+        (
+            b"id,name\n1,a\n\r\n",
+            "line 3 of 'data.csv' ends with CRLF (\\r\\n), but line 1 ends with LF (\\n)",
+        ),
+    ],
+    ids=["lf-then-crlf", "crlf-then-lf", "cr-then-lf", "blank-line-with-crlf"],
+)
+def test_mixed_line_endings_are_an_error(tmp_path: Path, content: bytes, expected: str) -> None:
+    # DuckDB cannot read such a file: its parser stops in an invalid state.
+    assert data_error(tmp_path, content) == (
+        f"{expected}; DuckDB cannot read a file that mixes line endings, so save it with one kind"
+    )
+
+
+def test_a_line_break_inside_quotes_is_data_not_a_line_ending(tmp_path: Path) -> None:
+    with open_csv(tmp_path, b'id,name\n1,"a\r\nb"\n2,c\n') as dataset:
+        assert rows(dataset) == [("1", "a\r\nb"), ("2", "c")]
+
+
+def test_spaces_around_a_quoted_field_are_dropped_by_duckdb(tmp_path: Path) -> None:
+    # Documented DuckDB behaviour: the quoted value is kept, the spaces are not.
+    with open_csv(tmp_path, b'id,name\n1, "a"\n2, b \n') as dataset:
+        assert rows(dataset) == [("1", "a"), ("2", " b ")]
+
+
+def test_a_duckdb_csv_error_names_the_line_but_never_the_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Skip RowGate's own checks so that DuckDB meets the stray quote itself.
+    monkeypatch.setattr(
+        source_module, "scan_csv", lambda path, delimiter, shown: (["id", "name"], 3)
+    )
+    message = data_error(tmp_path, b'id,name\n1,a\n2,"private-value"x\n3,c\n')
+    assert message == f"DuckDB could not read line 3 of 'data.csv' as CSV; {NOT_SHOWN}"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "Invalid Input Error: CSV Error on Line: 7\nOriginal Line: 7,private-value\n"
+            "Value with unterminated quote found.\n\nPossible fixes:\n* Disable strict mode",
+            f"DuckDB could not read line 7 of 'data.csv' as CSV; {NOT_SHOWN}",
+        ),
+        (
+            "Invalid Input Error: The CSV Parser state machine reached an invalid state.\n"
+            "Possible fixes:\n* Disable the parser's strict mode",
+            f"DuckDB could not read 'data.csv' as CSV; {NOT_SHOWN}",
+        ),
+    ],
+)
+def test_csv_read_errors_keep_only_the_line_number(raw: str, expected: str) -> None:
+    assert csv_read_error(duckdb.InvalidInputException(raw), "data.csv").message == expected
+
+
+def test_parquet_query_errors_show_no_details() -> None:
+    error = query_error(
+        duckdb.InvalidInputException("bad value 'private-value'"), "d.parquet", "parquet"
+    )
+    assert error.message == f"DuckDB could not read 'd.parquet' as Parquet; {NOT_SHOWN}"
+
+
+def test_parquet_metadata_errors_show_duckdb_first_line_only(tmp_path: Path) -> None:
+    message = data_error(tmp_path, b"id,name\n1,a\n", name="data.parquet")
+    assert message.startswith("cannot read 'data.parquet' as Parquet: ")
+    assert "\n" not in message
+    assert "Possible fixes" not in message
+
+
+def test_a_parquet_schema_that_cannot_be_described_is_a_data_error(tmp_path: Path) -> None:
+    params: dict[str, object] = {"rowgate_path": str(tmp_path / "data.parquet")}
+    with pytest.raises(DataError) as excinfo:
+        _describe(
+            database.connect(), source_module.PARQUET_RELATION, params, "d.parquet", "parquet"
+        )
+    assert excinfo.value.message.startswith("cannot read 'd.parquet' as Parquet: ")
+
+
+def test_a_parquet_metadata_error_without_text() -> None:
+    assert _metadata_error(duckdb.IOException(""), "d.parquet").message == (
+        "cannot read 'd.parquet' as Parquet: unknown error"
+    )

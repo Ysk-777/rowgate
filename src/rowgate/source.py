@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import codecs
 import csv
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -64,6 +65,14 @@ PARQUET_RELATION = "read_parquet($rowgate_path)"
 
 DEFAULT_DELIMITER = ","
 _CHUNK_SIZE = 1 << 20
+_ENDING_NAMES = {"\r\n": "CRLF (\\r\\n)", "\n": "LF (\\n)", "\r": "CR (\\r)"}
+_QUOTE_HINT = (
+    "check the quotes on that line: a quoted field must be closed, and only the delimiter "
+    "or a line break may follow its closing quote"
+)
+# DuckDB's CSV errors start with "CSV Error on Line: N". Only that number is
+# kept; the rest can quote the row itself, so it is never shown.
+_DUCKDB_CSV_LINE = re.compile(r"CSV Error on Line: ([0-9]+)")
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 
@@ -110,7 +119,8 @@ class Dataset:
 
     def scalar(self, sql: str, params: dict[str, object] | None = None) -> object:
         """Run a query that reads ``self.relation`` and return its single value."""
-        return _scalar(self._connection, sql, {**self._params, **(params or {})}, self.shown)
+        params = {**self._params, **(params or {})}
+        return _scalar(self._connection, sql, params, self.shown, self.file_format)
 
     def close(self) -> None:
         self._connection.close()
@@ -145,12 +155,12 @@ def open_dataset(rules_path: Path, source: Source) -> Dataset:
             check_names(_parquet_names(connection, params, shown), shown)
             relation = PARQUET_RELATION
 
-        columns = _describe(connection, relation, params, shown)
+        columns = _describe(connection, relation, params, shown, source.file_format)
         if source.file_format == "csv" and [c.name for c in columns] != header:
             raise DataError(f"DuckDB read different column names from {shown!r} than its header")
         # relation is CSV_RELATION or PARQUET_RELATION: fixed text, values bound.
         count_sql = f"SELECT count(*) FROM {relation}"  # noqa: S608
-        row_count = _scalar(connection, count_sql, params, shown)
+        row_count = _scalar(connection, count_sql, params, shown, source.file_format)
         if not isinstance(row_count, int):
             raise DataError(f"DuckDB returned no row count for {shown!r}")
         if scanned_rows is not None and row_count != scanned_rows:
@@ -206,12 +216,17 @@ def scan_csv(path: Path, delimiter: str, shown: str) -> tuple[list[str], int]:
     try:
         with path.open(encoding="utf-8-sig", newline="") as handle, _csv_field_limit(limit):
             lines = _PhysicalLines(handle, shown, limit)
-            reader = csv.reader(lines, delimiter=delimiter, strict=False)
-            return _read_records(reader, lines, shown)
+            try:
+                # strict: a stray quote such as 2,"ok"x is an error, as it is for DuckDB.
+                reader = csv.reader(lines, delimiter=delimiter, strict=True)
+                return _read_records(reader, lines, shown)
+            except csv.Error as exc:
+                raise DataError(
+                    f"line {lines.record_start} of {shown!r} is not valid CSV ({exc}); "
+                    f"{_QUOTE_HINT}"
+                ) from None
     except UnicodeDecodeError:
         raise DataError(_invalid_utf8_message(path, shown)) from None
-    except csv.Error as exc:
-        raise DataError(f"{shown!r} cannot be read as CSV: {exc}") from None
     except OSError as exc:
         raise DataError(f"cannot read {shown!r}: {exc.strerror or exc}") from None
 
@@ -244,6 +259,7 @@ class _PhysicalLines:
         self._limit = limit
         self.line = 0  # physical lines read so far
         self.record_start = 1
+        self.ending = ""  # line break of the last line read: \r\n, \n, \r or none
         self._record_bytes = 0
 
     def __iter__(self) -> Self:
@@ -260,6 +276,12 @@ class _PhysicalLines:
                 f"line {self.record_start} of {self._shown!r} is longer than "
                 f"{_size(self._limit)}, the most RowGate reads for one CSV record"
             )
+        if text.endswith("\r\n"):
+            self.ending = "\r\n"
+        elif text.endswith(("\n", "\r")):
+            self.ending = text[-1]
+        else:
+            self.ending = ""  # the last line of a file without a final line break
         return text
 
     def next_record(self) -> None:
@@ -281,14 +303,23 @@ def _read_records(
         raise DataError(f"{shown!r} has no header row")
     if not header:
         raise DataError(f"line 1 of {shown!r} is blank; the first line must be the header")
+    first_ending = lines.ending
     lines.next_record()
     check_names(header, shown)
     width = len(header)
     looks_commented = header[0].startswith("#")
     rows = 0
     for record in reader:
-        start = lines.record_start
+        start, end, ending = lines.record_start, lines.line, lines.ending
         lines.next_record()
+        # Only the line break that ends a record matters; one inside quotes is data.
+        # (A header without a line break ends the file, so first_ending is set.)
+        if ending and ending != first_ending:
+            raise DataError(
+                f"line {end} of {shown!r} ends with {_ENDING_NAMES[ending]}, but line 1 "
+                f"ends with {_ENDING_NAMES[first_ending]}; DuckDB cannot read a "
+                "file that mixes line endings, so save it with one kind"
+            )
         if not record and width > 1:
             raise DataError(
                 f"line {start} of {shown!r} is blank; RowGate does not skip blank lines, "
@@ -384,7 +415,7 @@ def _parquet_names(
             "SELECT name, num_children FROM parquet_schema($rowgate_path)", params
         ).fetchall()
     except duckdb.Error as exc:
-        raise DataError(f"cannot read {shown!r} as Parquet: {database.error_text(exc)}") from None
+        raise _metadata_error(exc, shown) from None
     names: list[str] = []
     index = 1  # row 0 is the schema root
     for _ in range(rows[0][1] or 0):
@@ -397,22 +428,56 @@ def _parquet_names(
 
 
 def _describe(
-    connection: duckdb.DuckDBPyConnection, relation: str, params: dict[str, object], shown: str
+    connection: duckdb.DuckDBPyConnection,
+    relation: str,
+    params: dict[str, object],
+    shown: str,
+    file_format: FileFormat,
 ) -> list[Column]:
     try:
         # relation is CSV_RELATION or PARQUET_RELATION: fixed text, values bound.
         describe_sql = f"SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM {relation})"  # noqa: S608
         rows = connection.execute(describe_sql, params).fetchall()
     except duckdb.Error as exc:
-        raise DataError(f"cannot read {shown!r}: {database.error_text(exc)}") from None
+        if file_format == "csv":
+            raise csv_read_error(exc, shown) from None
+        raise _metadata_error(exc, shown) from None
     return [Column(name, column_type) for name, column_type in rows]
 
 
 def _scalar(
-    connection: duckdb.DuckDBPyConnection, sql: str, params: dict[str, object], shown: str
+    connection: duckdb.DuckDBPyConnection,
+    sql: str,
+    params: dict[str, object],
+    shown: str,
+    file_format: FileFormat,
 ) -> object:
     try:
         row = connection.execute(sql, params).fetchone()
     except duckdb.Error as exc:
-        raise DataError(f"cannot read {shown!r}: {database.error_text(exc)}") from None
+        raise query_error(exc, shown, file_format) from None
     return None if row is None else row[0]
+
+
+_NOT_SHOWN = "RowGate does not show DuckDB's explanation, because it can include data values"
+
+
+def csv_read_error(exc: duckdb.Error, shown: str) -> DataError:
+    """DuckDB failed while reading a CSV file: name the line if DuckDB gave one."""
+    match = _DUCKDB_CSV_LINE.search(str(exc))
+    where = f"line {match[1]} of {shown!r}" if match else repr(shown)
+    return DataError(f"DuckDB could not read {where} as CSV; {_NOT_SHOWN}")
+
+
+def query_error(exc: duckdb.Error, shown: str, file_format: FileFormat) -> DataError:
+    """DuckDB failed while running a query over the data."""
+    if file_format == "csv":
+        return csv_read_error(exc, shown)
+    return DataError(f"DuckDB could not read {shown!r} as Parquet; {_NOT_SHOWN}")
+
+
+def _metadata_error(exc: duckdb.Error, shown: str) -> DataError:
+    # Errors about a Parquet file's metadata (not a Parquet file, a broken
+    # footer) hold no row values, so DuckDB's first line is shown.
+    detail = database.error_text(exc).splitlines()[0] if str(exc) else "unknown error"
+    return DataError(f"cannot read {shown!r} as Parquet: {detail}")
