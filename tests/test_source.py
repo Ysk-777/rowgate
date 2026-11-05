@@ -460,10 +460,10 @@ def test_nested_parquet_columns_are_one_column_each(tmp_path: Path) -> None:
 
 
 def test_queries_cannot_read_any_other_file(tmp_path: Path) -> None:
-    (tmp_path / "secret.csv").write_text("token\nnot-for-rowgate\n", encoding="utf-8")
+    (tmp_path / "other.csv").write_text("id\nnot-for-rowgate\n", encoding="utf-8")
     with open_csv(tmp_path, b"id\n1\n") as dataset:
         with pytest.raises(DataError):
-            dataset.scalar("SELECT * FROM read_csv($p)", {"p": str(tmp_path / "secret.csv")})
+            dataset.scalar("SELECT * FROM read_csv($p)", {"p": str(tmp_path / "other.csv")})
         assert dataset.row_count == 1  # the data file itself is still readable
 
 

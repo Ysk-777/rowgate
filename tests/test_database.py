@@ -160,7 +160,7 @@ def two_files(tmp_path: Path) -> tuple[Path, Path]:
     allowed = tmp_path / "allowed.csv"
     other = tmp_path / "other.csv"
     allowed.write_text("a\n1\n2\n", encoding="utf-8")
-    other.write_text("a\nsecret\n", encoding="utf-8")
+    other.write_text("a\nnot-allowed\n", encoding="utf-8")
     return allowed.resolve(), other.resolve()
 
 
