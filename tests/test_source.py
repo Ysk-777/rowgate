@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import os
 from pathlib import Path
 
@@ -564,8 +565,6 @@ def test_an_unreadable_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 def test_csv_errors_from_python_are_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import csv
-
     def broken_reader(*args: object, **kwargs: object) -> object:
         raise csv.Error("something odd")
 
@@ -623,3 +622,80 @@ def test_columns_are_looked_up_by_exact_name(tmp_path: Path) -> None:
     with open_csv(tmp_path, b"id,Name\n1,a\n") as dataset:
         assert dataset.column("Name") == Column("Name", "VARCHAR")
         assert dataset.column("name") is None
+
+
+# --- long fields and records -------------------------------------------------------------------
+
+
+def test_a_200_kb_field_is_read_and_the_csv_limit_is_restored(tmp_path: Path) -> None:
+    # Python's csv module refuses fields over 128 KiB unless its limit is raised.
+    before = csv.field_size_limit()
+    with open_csv(tmp_path, b"id,blob\n1," + b"x" * 200_000 + b"\n") as dataset:
+        assert dataset.row_count == 1
+        assert dataset.scalar(f"SELECT length(blob) FROM {dataset.relation}") == 200_000  # noqa: S608
+    assert csv.field_size_limit() == before
+
+
+def test_the_csv_limit_is_restored_after_an_error(tmp_path: Path) -> None:
+    before = csv.field_size_limit()
+    data_error(tmp_path, b"id,blob\n1," + b"x" * 200_000 + b",extra\n")
+    assert csv.field_size_limit() == before
+
+
+def test_a_3_mb_field_is_read(tmp_path: Path) -> None:
+    # Over DuckDB's default max_line_size of 2 MiB, which RowGate raises.
+    with open_csv(tmp_path, b"id,blob\n1," + b"x" * 3_000_000 + b"\n2,ok\n") as dataset:
+        assert dataset.row_count == 2
+        assert dataset.scalar(f"SELECT max(length(blob)) FROM {dataset.relation}") == 3_000_000  # noqa: S608
+
+
+def test_a_record_over_the_limit_is_an_error_naming_line_and_limit(tmp_path: Path) -> None:
+    content = b"id,blob\n1,ok\n2," + b"x" * source_module.MAX_RECORD_BYTES + b"\n"
+    assert data_error(tmp_path, content) == (
+        "line 3 of 'data.csv' is longer than 16 MiB, the most RowGate reads for one CSV record"
+    )
+
+
+@pytest.fixture
+def small_limit(monkeypatch: pytest.MonkeyPatch) -> int:
+    monkeypatch.setattr(source_module, "MAX_RECORD_BYTES", 100)
+    return 100
+
+
+def test_the_limit_counts_bytes_including_the_line_break(tmp_path: Path, small_limit: int) -> None:
+    # "2," + 97 x + "\n" is exactly 100 bytes: allowed. One more byte is not.
+    with open_csv(tmp_path, b"id,blob\n2," + b"x" * 97 + b"\n") as dataset:
+        assert dataset.row_count == 1
+    assert data_error(tmp_path, b"id,blob\n2," + b"x" * 98 + b"\n") == (
+        "line 2 of 'data.csv' is longer than 100 bytes, the most RowGate reads for one CSV record"
+    )
+
+
+def test_the_limit_counts_utf8_bytes_not_characters(tmp_path: Path, small_limit: int) -> None:
+    # 40 characters, but 80 bytes of é plus "2," and "\n": 83 bytes, allowed;
+    # 50 characters of é is 103 bytes, refused.
+    with open_csv(tmp_path, ("id,blob\n2," + "é" * 40 + "\n").encode()) as dataset:
+        assert dataset.row_count == 1
+    message = data_error(tmp_path, ("id,blob\n2," + "é" * 50 + "\n").encode())
+    assert message.startswith("line 2 of 'data.csv' is longer than 100 bytes")
+
+
+def test_a_record_of_many_short_lines_inside_quotes_counts_as_one(
+    tmp_path: Path, small_limit: int
+) -> None:
+    content = b'id,blob\n1,ok\n2,"' + b"line\n" * 30 + b'"\n3,ok\n'
+    assert data_error(tmp_path, content) == (
+        "line 3 of 'data.csv' is longer than 100 bytes, the most RowGate reads for one CSV record"
+    )
+
+
+def test_one_huge_line_is_refused_without_reading_it_whole(
+    tmp_path: Path, small_limit: int
+) -> None:
+    message = data_error(tmp_path, b"id,blob\n1," + b"x" * 5_000_000 + b"\n")
+    assert message.startswith("line 2 of 'data.csv' is longer than 100 bytes")
+
+
+def test_the_header_is_also_limited(tmp_path: Path, small_limit: int) -> None:
+    message = data_error(tmp_path, b"id," + b"n" * 200 + b"\n1,2\n")
+    assert message.startswith("line 1 of 'data.csv' is longer than 100 bytes")

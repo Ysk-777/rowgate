@@ -17,18 +17,26 @@ from __future__ import annotations
 
 import codecs
 import csv
-import sys
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Self, TextIO
 
 import duckdb
 
 from rowgate import database
 from rowgate.errors import DataError
 from rowgate.rules import FileFormat, Source, glob_characters
+
+# The longest CSV record RowGate reads: one line, or several lines inside
+# quotes, counted in bytes with the line break.
+MAX_RECORD_BYTES = 16 * 1024 * 1024
+# DuckDB stops at its own max_line_size (2 MiB by default, also counted per
+# record). It is set well above RowGate's limit, so RowGate's check, which
+# names the line, always comes first.
+_DUCKDB_MAX_LINE_SIZE = 2 * MAX_RECORD_BYTES
 
 # Fixed reading options for CSV files. auto_detect is off, so DuckDB guesses
 # nothing: not the delimiter, quoting, header, comment character or types.
@@ -48,6 +56,7 @@ _CSV_OPTIONS = ", ".join(
         "allow_quoted_nulls := false",
         "comment := ''",
         "null_padding := false",
+        f"max_line_size := {_DUCKDB_MAX_LINE_SIZE}",
     ]
 )
 CSV_RELATION = f"read_csv($rowgate_path, {_CSV_OPTIONS})"
@@ -55,9 +64,6 @@ PARQUET_RELATION = "read_parquet($rowgate_path)"
 
 DEFAULT_DELIMITER = ","
 _CHUNK_SIZE = 1 << 20
-# Python's csv module refuses fields over 128 KiB by default; let DuckDB's
-# own line-size limit be the one that applies.
-_FIELD_SIZE_LIMIT = min(sys.maxsize, 2**31 - 1)
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 
@@ -193,12 +199,15 @@ def scan_csv(path: Path, delimiter: str, shown: str) -> tuple[list[str], int]:
 
     Raises DataError for anything RowGate refuses to guess about: invalid
     UTF-8, a missing or blank header, empty or duplicate column names,
-    blank lines, and lines with the wrong number of fields.
+    blank lines, lines with the wrong number of fields, and records longer
+    than MAX_RECORD_BYTES.
     """
-    csv.field_size_limit(_FIELD_SIZE_LIMIT)
+    limit = MAX_RECORD_BYTES
     try:
-        with path.open(encoding="utf-8-sig", newline="") as handle:
-            return _read_records(csv.reader(handle, delimiter=delimiter, strict=False), shown)
+        with path.open(encoding="utf-8-sig", newline="") as handle, _csv_field_limit(limit):
+            lines = _PhysicalLines(handle, shown, limit)
+            reader = csv.reader(lines, delimiter=delimiter, strict=False)
+            return _read_records(reader, lines, shown)
     except UnicodeDecodeError:
         raise DataError(_invalid_utf8_message(path, shown)) from None
     except csv.Error as exc:
@@ -207,19 +216,79 @@ def scan_csv(path: Path, delimiter: str, shown: str) -> tuple[list[str], int]:
         raise DataError(f"cannot read {shown!r}: {exc.strerror or exc}") from None
 
 
-def _read_records(reader: Iterator[list[str]], shown: str) -> tuple[list[str], int]:
+@contextmanager
+def _csv_field_limit(limit: int) -> Iterator[None]:
+    """Raise Python's csv field limit (128 KiB by default) for one scan, then restore it.
+
+    A field can be no longer than its record, so RowGate's record limit
+    always applies first; the csv module's own limit never triggers.
+    """
+    previous = csv.field_size_limit(limit)
+    try:
+        yield
+    finally:
+        csv.field_size_limit(previous)
+
+
+class _PhysicalLines:
+    """Hands csv.reader one physical line at a time, measuring each record.
+
+    ``record_start`` is the line a record starts on. A record over the limit
+    is refused before csv.reader sees it, and each line is read with a size
+    cap, so one enormous line is never loaded whole.
+    """
+
+    def __init__(self, handle: TextIO, shown: str, limit: int) -> None:
+        self._handle = handle
+        self._shown = shown
+        self._limit = limit
+        self.line = 0  # physical lines read so far
+        self.record_start = 1
+        self._record_bytes = 0
+
+    def __iter__(self) -> Self:
+        return self
+
+    def __next__(self) -> str:
+        text = self._handle.readline(self._limit + 1)  # at most limit + 1 characters
+        if not text:
+            raise StopIteration
+        self.line += 1
+        self._record_bytes += len(text) if text.isascii() else len(text.encode("utf-8"))
+        if self._record_bytes > self._limit:
+            raise DataError(
+                f"line {self.record_start} of {self._shown!r} is longer than "
+                f"{_size(self._limit)}, the most RowGate reads for one CSV record"
+            )
+        return text
+
+    def next_record(self) -> None:
+        """Call after csv.reader returns a record: the next one starts on the next line."""
+        self.record_start = self.line + 1
+        self._record_bytes = 0
+
+
+def _size(count: int) -> str:
+    mib = 1024 * 1024
+    return f"{count // mib} MiB" if count % mib == 0 else f"{count} bytes"
+
+
+def _read_records(
+    reader: Iterator[list[str]], lines: _PhysicalLines, shown: str
+) -> tuple[list[str], int]:
     header = next(reader, None)
     if header is None:
         raise DataError(f"{shown!r} has no header row")
     if not header:
         raise DataError(f"line 1 of {shown!r} is blank; the first line must be the header")
+    lines.next_record()
     check_names(header, shown)
     width = len(header)
     looks_commented = header[0].startswith("#")
     rows = 0
-    line = _line_number(reader)
     for record in reader:
-        start, line = line + 1, _line_number(reader)
+        start = lines.record_start
+        lines.next_record()
         if not record and width > 1:
             raise DataError(
                 f"line {start} of {shown!r} is blank; RowGate does not skip blank lines, "
@@ -237,11 +306,6 @@ def _read_records(reader: Iterator[list[str]], shown: str) -> tuple[list[str], i
             )
         rows += 1  # in a one-column file a blank line is a row with an empty (NULL) value
     return header, rows
-
-
-def _line_number(reader: Iterator[list[str]]) -> int:
-    line_num = getattr(reader, "line_num", 0)
-    return line_num if isinstance(line_num, int) else 0
 
 
 def _fields(count: int) -> str:

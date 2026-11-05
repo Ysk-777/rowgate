@@ -73,6 +73,9 @@ DuckDB fixed options, with DuckDB's automatic detection switched off:
   first column name. Invalid UTF-8 is an error that names the line and byte
   offset.
 - Line endings may be `\n`, `\r\n` or `\r`.
+- One record (a line, or several lines inside quotes) may be up to 16 MiB,
+  counted in bytes including its line break. A longer record is an error that
+  names its line. Long fields are fine within that limit.
 - Before checking, RowGate counts the data rows itself and makes sure DuckDB
   read the same number. If they differ, it stops with exit 2 rather than
   check part of the file.
