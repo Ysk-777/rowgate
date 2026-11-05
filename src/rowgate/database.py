@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import functools
 import re
+from pathlib import Path
 
 import duckdb
 
@@ -18,15 +19,24 @@ _CONFIG = {
 _ERROR_PREFIX = re.compile(r"^[A-Za-z ]*Error: ")
 
 
-def connect() -> duckdb.DuckDBPyConnection:
-    """Open an in-memory connection that cannot read or write any file.
+def connect(readable_file: Path | None = None) -> duckdb.DuckDBPyConnection:
+    """Open an in-memory connection that can read at most one file.
 
-    Extensions cannot be installed or loaded, the time zone is fixed to UTC
-    so output does not depend on the machine, and the configuration is
+    With ``readable_file`` (an absolute path), that exact file is the only one
+    the connection can read; without it, no file at all. Nothing can be
+    written, extensions cannot be installed or loaded, the time zone is fixed
+    to UTC so output does not depend on the machine, and the configuration is
     locked so SQL cannot loosen any of this.
+
+    The order matters: DuckDB refuses to change allowed_paths once external
+    access is off, and passing both in the connect config fails for the same
+    reason. So the file is allowed first, then access is switched off, then
+    the configuration is locked.
     """
     connection = duckdb.connect(":memory:", config=dict(_CONFIG))
     try:
+        if readable_file is not None:
+            connection.execute("SET allowed_paths = $paths", {"paths": [str(readable_file)]})
         connection.execute("SET enable_external_access = false")
         connection.execute("SET TimeZone = 'UTC'")
         connection.execute("SET lock_configuration = true")

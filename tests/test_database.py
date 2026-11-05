@@ -110,7 +110,7 @@ def test_connection_is_closed_if_setup_fails(monkeypatch: pytest.MonkeyPatch) ->
     closed: list[bool] = []
 
     class FailingConnection:
-        def execute(self, statement: str) -> None:
+        def execute(self, statement: str, params: object = None) -> None:
             raise duckdb.InvalidInputException("setup failed")
 
         def close(self) -> None:
@@ -149,3 +149,76 @@ def test_no_leak_warnings_when_an_error_outlives_the_program() -> None:
     )
     assert completed.returncode == 0
     assert completed.stderr == ""
+
+
+# --- a connection that may read exactly one file -----------------------------------
+
+
+@pytest.fixture
+def two_files(tmp_path: Path) -> tuple[Path, Path]:
+    allowed = tmp_path / "allowed.csv"
+    other = tmp_path / "other.csv"
+    allowed.write_text("a\n1\n2\n", encoding="utf-8")
+    other.write_text("a\nsecret\n", encoding="utf-8")
+    return allowed.resolve(), other.resolve()
+
+
+def count_rows(connection: duckdb.DuckDBPyConnection, path: str) -> object:
+    row = connection.execute("SELECT count(*) FROM read_csv($path)", {"path": path}).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def test_the_allowed_file_can_be_read(two_files: tuple[Path, Path]) -> None:
+    allowed, _ = two_files
+    assert count_rows(connect(allowed), str(allowed)) == 2
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "{other}",  # another file in the same folder
+        "{folder}/*.csv",  # a glob that would match the allowed file too
+        "{folder}/sub/../other.csv",  # a path that climbs out and back
+        "/etc/hostname",  # anything else on the machine
+    ],
+)
+def test_no_other_file_can_be_read(two_files: tuple[Path, Path], target: str) -> None:
+    allowed, other = two_files
+    path = target.format(other=other, folder=allowed.parent)
+    with pytest.raises(duckdb.PermissionException):
+        count_rows(connect(allowed), path)
+
+
+def test_the_allowed_file_cannot_be_written(two_files: tuple[Path, Path]) -> None:
+    allowed, _ = two_files
+    with pytest.raises(duckdb.PermissionException):
+        connect(allowed).execute(f"COPY (SELECT 1) TO '{allowed}'")
+    assert allowed.read_text(encoding="utf-8") == "a\n1\n2\n"
+
+
+def test_more_files_cannot_be_allowed_later(two_files: tuple[Path, Path]) -> None:
+    allowed, other = two_files
+    connection = connect(allowed)
+    with pytest.raises(duckdb.Error):
+        connection.execute("SET allowed_paths = $paths", {"paths": [str(other)]})
+    with pytest.raises(duckdb.PermissionException):
+        count_rows(connection, str(other))
+
+
+def test_allowed_paths_must_be_set_before_external_access_is_switched_off(
+    two_files: tuple[Path, Path],
+) -> None:
+    # Why connect() uses three SET statements in this order: DuckDB refuses
+    # both settings together in the connect config, and refuses allowed_paths
+    # once external access is off.
+    allowed, _ = two_files
+    with pytest.raises(duckdb.Error):
+        duckdb.connect(
+            ":memory:",
+            config={"allowed_paths": [str(allowed)], "enable_external_access": False},
+        )
+    connection = duckdb.connect(":memory:")
+    connection.execute("SET enable_external_access = false")
+    with pytest.raises(duckdb.Error):
+        connection.execute("SET allowed_paths = $paths", {"paths": [str(allowed)]})
