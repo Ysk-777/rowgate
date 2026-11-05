@@ -699,3 +699,31 @@ def test_other_yaml_types_are_named_in_messages(tmp_path: Path) -> None:
 def test_bounds_of_different_kinds_are_never_compared() -> None:
     with pytest.raises(TypeError):
         _greater(1, date(2024, 1, 1))
+
+
+@pytest.mark.parametrize(
+    ("pattern", "problem"),
+    [
+        ("'a(b'", "missing ): a(b"),
+        ("'(?=[A-Z])'", "invalid perl operator: (?="),
+        ("'(a)\\1'", "invalid escape sequence: \\1"),
+    ],
+)
+def test_invalid_regex_is_a_rules_error(tmp_path: Path, pattern: str, problem: str) -> None:
+    text = rules_text(f"{{rule: regex, column: sku, pattern: {pattern}}}")
+    assert problems(tmp_path, text) == [
+        f"check 1 (regex), field 'pattern': invalid regular expression: {problem}"
+    ]
+
+
+def test_every_invalid_regex_is_reported(tmp_path: Path) -> None:
+    text = rules_text(
+        "{rule: regex, column: a, pattern: 'ok+'}",
+        "{rule: regex, column: b, pattern: '[z-a]'}",
+        "{rule: regex, column: c, pattern: 'x**'}",
+    )
+    assert problems(tmp_path, text) == [
+        "check 2 (regex), field 'pattern': invalid regular expression: "
+        "invalid character class range: z-a",
+        "check 3 (regex), field 'pattern': invalid regular expression: bad repetition operator: **",
+    ]

@@ -22,6 +22,8 @@ from pydantic import (
     model_validator,
 )
 
+from rowgate.database import regex_error
+
 Severity = Literal["error", "warn"]
 FileFormat = Literal["csv", "parquet"]
 ValueKind = Literal["text", "number", "boolean"]
@@ -304,6 +306,14 @@ class Regex(_Check):
     rule: Literal["regex"]
     column: ColumnName
     pattern: Annotated[str, Field(min_length=1)]
+
+    @field_validator("pattern")
+    @classmethod
+    def _compiles(cls, value: str) -> str:
+        problem = regex_error(value)
+        if problem is not None:
+            raise ValueError(f"invalid regular expression: {problem}")
+        return value
 
 
 Check = Annotated[
