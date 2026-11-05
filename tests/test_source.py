@@ -385,6 +385,27 @@ def test_duplicate_parquet_column_names_are_an_error(
     )
 
 
+def test_nested_field_names_are_not_top_level_duplicates(tmp_path: Path) -> None:
+    # parquet_schema lists every nested field, so "id" appears four times in
+    # this file's schema: only the top-level columns are compared.
+    write_parquet(
+        tmp_path / "data.parquet",
+        "SELECT 1 AS id, {'id': 2, 'name': 'b'} AS billing, {'id': 3, 'name': 's'} AS shipping, "
+        "[{'id': 4}, {'id': 5}] AS items, [[1, 2], [3]] AS matrix, "
+        "{'inner': {'id': 6}} AS deep",
+    )
+    with open_dataset(tmp_path / "rules.yaml", source("data.parquet")) as dataset:
+        assert [(c.name, c.type) for c in dataset.columns] == [
+            ("id", "INTEGER"),
+            ("billing", 'STRUCT(id INTEGER, "name" VARCHAR)'),
+            ("shipping", 'STRUCT(id INTEGER, "name" VARCHAR)'),
+            ("items", "STRUCT(id INTEGER)[]"),
+            ("matrix", "INTEGER[][]"),
+            ("deep", 'STRUCT("inner" STRUCT(id INTEGER))'),
+        ]
+        assert dataset.row_count == 1
+
+
 def test_nested_parquet_columns_are_one_column_each(tmp_path: Path) -> None:
     parquet_with_names(tmp_path, b"colname", b"another")
     with open_dataset(tmp_path / "rules.yaml", source("data.parquet")) as dataset:
