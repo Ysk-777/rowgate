@@ -1,14 +1,18 @@
-"""Read a rules file from disk and parse its YAML."""
+"""Read a rules file, parse its YAML and validate it against the rules format."""
 
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import BaseModel, ValidationError
+from pydantic_core import ErrorDetails
 from yaml.constructor import ConstructorError
 
 from rowgate.errors import RulesError
+from rowgate.rules import RULE_MODELS, RulesFile, Source, describe_value
 
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 
@@ -108,3 +112,110 @@ def _describe_marked_error(exc: yaml.MarkedYAMLError) -> str:
 
 def _one_line(text: str) -> str:
     return " ".join(text.split())
+
+
+def load_rules(path: Path) -> RulesFile:
+    """Read, parse and validate a rules file. Raises RulesError listing every problem."""
+    shown = str(path)
+    data = parse_rules_yaml(read_rules_text(path), shown)
+    try:
+        return RulesFile.model_validate(data)
+    except ValidationError as exc:
+        raise RulesError(shown, describe_validation_errors(exc)) from None
+
+
+def describe_validation_errors(exc: ValidationError) -> list[str]:
+    """Turn pydantic errors into messages that name the check number and field."""
+    return [_describe_error(error) for error in exc.errors(include_url=False)]
+
+
+def _describe_error(error: ErrorDetails) -> str:
+    where, model, field = _locate(error["loc"])
+    message = _message(error, model, field)
+    return f"{where}: {message}" if where else message
+
+
+def _locate(loc: tuple[int | str, ...]) -> tuple[str, type[BaseModel] | None, str | None]:
+    """Return a readable location, the model that owns the field, and the field name."""
+    parts = list(loc)
+    labels: list[str] = []
+    model: type[BaseModel] | None = RulesFile
+    prefix = ""
+    if len(parts) >= 2 and parts[0] == "checks" and isinstance(parts[1], int):
+        label = f"check {parts[1] + 1}"
+        parts = parts[2:]
+        model = None
+        if parts and isinstance(parts[0], str) and parts[0] in RULE_MODELS:
+            label += f" ({parts[0]})"
+            model = RULE_MODELS[parts[0]]
+            parts = parts[1:]
+        labels.append(label)
+    elif len(parts) >= 2 and parts[0] == "source":
+        model = Source
+        prefix = "source."
+        parts = parts[1:]
+
+    field: str | None = None
+    if parts:
+        field = str(parts[0])
+        labels.append(f"field '{prefix}{field}'")
+        labels.extend(
+            f"item {part + 1}" if isinstance(part, int) else str(part) for part in parts[1:]
+        )
+    return ", ".join(labels), model, field
+
+
+def _message(error: ErrorDetails, model: type[BaseModel] | None, field: str | None) -> str:
+    kind = error["type"]
+    value = error.get("input")
+    ctx = error.get("ctx", {})
+    got = describe_value(value)
+    if kind == "missing":
+        return "required field is missing"
+    if kind == "extra_forbidden":
+        return _unknown_field(model, field)
+    if kind == "union_tag_not_found":
+        return f"missing required field 'rule' (one of: {', '.join(RULE_MODELS)})"
+    if kind == "union_tag_invalid":
+        return _unknown_rule(value)
+    if kind in {"model_type", "model_attributes_type", "dict_type"}:
+        if field is None and model is RulesFile:
+            return (
+                f"the rules file must be a mapping with 'version', 'source' and 'checks', got {got}"
+            )
+        return f"expected a mapping of fields, got {got}"
+    if kind == "literal_error":
+        if model is RulesFile and field == "version":
+            return f"unsupported version; expected 1, got {got}"
+        return f"expected {ctx['expected']}, got {got}"
+    if kind == "value_error":
+        return str(ctx["error"])
+    simple = {
+        "string_type": f"expected a string, got {got}",
+        "int_type": f"expected a whole number, got {got}",
+        "list_type": f"expected a list, got {got}",
+        "too_short": "must contain at least one item",
+        "string_too_short": "must not be empty",
+        "greater_than_equal": f"must be {ctx.get('ge')} or more, got {got}",
+    }
+    return simple.get(kind, error["msg"])
+
+
+def _unknown_field(model: type[BaseModel] | None, field: str | None) -> str:
+    if model is None or field is None:
+        return "unknown field"
+    allowed = sorted(model.model_fields, key=lambda name: (name != "rule", name))
+    close = difflib.get_close_matches(field, allowed, n=1)
+    if close:
+        return f"unknown field (did you mean '{close[0]}'?)"
+    return f"unknown field (allowed fields: {', '.join(allowed)})"
+
+
+def _unknown_rule(value: object) -> str:
+    rule = value.get("rule") if isinstance(value, dict) else None
+    known = ", ".join(RULE_MODELS)
+    if not isinstance(rule, str):
+        return f"field 'rule' must be the name of a rule, got {describe_value(rule)}"
+    close = difflib.get_close_matches(rule, list(RULE_MODELS), n=1)
+    hint = f" (did you mean '{close[0]}'?)" if close else ""
+    return f"unknown rule {rule!r}{hint}; known rules: {known}"
