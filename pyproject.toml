@@ -1,0 +1,97 @@
+[build-system]
+requires = ["flit_core>=4.2.0,<5"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "rowgate"
+dynamic = ["version"]
+description = "Check local CSV and Parquet files against YAML rules using DuckDB, with exit codes CI can use."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Youssef Kedidi" }]
+requires-python = ">=3.11"
+keywords = ["data-quality", "csv", "parquet", "duckdb", "validation", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
+]
+# Lower bounds are the versions RowGate is developed and tested with.
+dependencies = [
+    "duckdb>=2.0.0,<3",
+    "typer>=0.27.3,<0.28",
+    "pyyaml>=6.0.3,<7",
+    "pydantic>=2.14.3,<3",
+    "rich>=15.0.0,<16",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
+    "hypothesis>=6.170.14",
+    "ruff>=0.17.4",
+    "mypy>=2.4.1",
+    "types-PyYAML>=6.0.12.20261103",
+]
+
+[project.scripts]
+rowgate = "rowgate.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # bugbear
+    "UP",   # pyupgrade
+    "SIM",  # simplify
+    "C4",   # comprehensions
+    "RET",  # return statements
+    "PTH",  # prefer pathlib
+    "PT",   # pytest style
+    "BLE",  # blind except
+    "S",    # bandit security checks
+    "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is how pytest tests work; subprocess calls in tests use sys.executable.
+"tests/**" = ["S101", "S603"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+xfail_strict = true
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["rowgate"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_also = ["if TYPE_CHECKING:"]
