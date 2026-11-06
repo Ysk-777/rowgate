@@ -145,6 +145,30 @@ Floating-point columns follow DuckDB's rules for NaN and zero:
 
 In a CSV file, `NaN` is only text, compared like any other text.
 
+### The exact DuckDB options
+
+Every option RowGate passes to DuckDB's `read_csv`, and why:
+
+| Option | Why |
+| ------ | --- |
+| `header := true` | the first line is the header |
+| `auto_detect := false` | guess nothing: no detected delimiter, quoting, header, comment character or types |
+| `columns := {...}` | the names from RowGate's own reading of the header, all `VARCHAR` |
+| `all_varchar := true` | every value is text, exactly as written |
+| `delim := ...` | `source.delimiter`, or a comma |
+| `quote := '"'`, `escape := '"'` | RFC 4180 quoting |
+| `skip := 0` | no line before the header is skipped |
+| `strict_mode := true` | rows that break the CSV format are errors |
+| `allow_quoted_nulls := false` | `""` is empty text, not NULL |
+| `comment := ''` | no comment character: lines starting with `#` are data |
+| `null_padding := false` | short rows are errors, not padded with NULLs |
+| `hive_partitioning := false` | a `key=value` folder is not a column |
+| `parallel := false` | the parallel reader gives up on some valid files |
+| `compression := 'none'` | the file name never makes DuckDB decompress |
+| `max_line_size := 33554432` | only for a file with a record over 1 MiB; DuckDB's 2 MiB default otherwise, because a larger value slows every scan |
+
+For `read_parquet` the only option is `hive_partitioning := false`.
+
 ### Column names
 
 - Names are matched exactly, including case and spaces. Names with spaces,
