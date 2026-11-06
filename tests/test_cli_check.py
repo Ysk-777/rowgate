@@ -11,7 +11,9 @@ import pytest
 from typer.testing import CliRunner
 
 from rowgate import cli
+from rowgate import source as source_module
 from rowgate.cli import app
+from rowgate.source import CsvLayout
 
 ORDERS = b"order_id,status,amount\n1001,paid,10\n1002,new,\n1003,paid,30\n1003,shipped,40\n"
 
@@ -270,3 +272,33 @@ def test_unreadable_lines_are_reported_without_their_content(
     assert "private-value" not in completed.stderr
     assert "Possible fixes" not in completed.stderr
     assert len(completed.stderr) < 300
+
+
+# --- DuckDB's own message, only with --debug ------------------------------------------------------
+
+
+@pytest.fixture
+def duckdb_meets_a_bad_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Skip RowGate's own CSV checks so that DuckDB itself fails on line 3.
+    monkeypatch.setattr(
+        source_module, "scan_csv", lambda *args: CsvLayout(["order_id", "status", "amount"], 2, 0)
+    )
+    return project(tmp_path, data=b'order_id,status,amount\n1,paid,10\n2,"private-value"x,3\n')
+
+
+def test_without_debug_duckdb_message_is_hidden(duckdb_meets_a_bad_line: Path) -> None:
+    code, out, err = run("check", str(duckdb_meets_a_bad_line))
+    assert (code, out) == (2, "")
+    assert err == (
+        "error: DuckDB could not read line 3 of 'orders.csv' as CSV; run again with --debug to "
+        "see DuckDB's own message, which can include data values from the file\n"
+    )
+
+
+def test_with_debug_duckdb_message_is_printed(duckdb_meets_a_bad_line: Path) -> None:
+    code, out, err = run("check", str(duckdb_meets_a_bad_line), "--debug")
+    assert (code, out) == (2, "")
+    assert "Traceback (most recent call last)" in err
+    assert "DuckDB's original message (it can include data values from the file):\n" in err
+    assert "private-value" in err  # DuckDB quotes the row
+    assert err.endswith("error: DuckDB could not read line 3 of 'orders.csv' as CSV\n")

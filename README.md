@@ -15,7 +15,9 @@ the first release; this page records the behaviour decided so far.
 | 1 | At least one check with severity `error` failed. |
 | 2 | Bad usage, a bad rules file, an unreadable data file, or an internal error. |
 
-A traceback is printed only when `--debug` is passed.
+A traceback is printed only when `--debug` is passed. When DuckDB fails to
+read the data, `--debug` also prints DuckDB's original message, which can
+include data values from the file.
 
 ## Writing values in the rules file
 
@@ -103,9 +105,12 @@ DuckDB fixed options, with DuckDB's automatic detection switched off:
   read the same number. If they differ, it stops with exit 2 rather than
   check part of the file.
 - Error messages name the file and line but never print the line itself, so
-  data values do not leak into logs. When DuckDB itself rejects a line,
-  RowGate reports the line number and leaves out DuckDB's explanation, which
-  can quote the row.
+  data values do not leak into logs. When DuckDB itself fails, RowGate
+  reports the line number if DuckDB gave one, and otherwise says that it could
+  not read the file, without suggesting the CSV is invalid. DuckDB's own
+  message is left out because it can quote the row; run again with `--debug`
+  to print it (along with a traceback). Only do that where data values may
+  appear in the output.
 
 Every CSV value is read as text, exactly as written:
 

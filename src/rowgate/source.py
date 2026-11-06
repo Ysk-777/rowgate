@@ -558,25 +558,32 @@ def _scalar(
     return None if row is None else row[0]
 
 
-_NOT_SHOWN = "RowGate does not show DuckDB's explanation, because it can include data values"
-
-
 def csv_read_error(exc: duckdb.Error, shown: str) -> DataError:
-    """DuckDB failed while reading a CSV file: name the line if DuckDB gave one."""
+    """DuckDB failed while reading a CSV file: name the line if DuckDB gave one.
+
+    DuckDB's own text can quote the row, so it is kept for --debug only.
+    """
     match = _DUCKDB_CSV_LINE.search(str(exc))
-    where = f"line {match[1]} of {shown!r}" if match else repr(shown)
-    return DataError(f"DuckDB could not read {where} as CSV; {_NOT_SHOWN}")
+    if match:
+        message = f"DuckDB could not read line {match[1]} of {shown!r} as CSV"
+    else:
+        # Not about a line, e.g. "Not implemented": the CSV may be fine.
+        message = f"RowGate could not read {shown!r}: DuckDB failed without naming a line"
+    return DataError(message, duckdb_message=str(exc))
 
 
 def query_error(exc: duckdb.Error, shown: str, file_format: FileFormat) -> DataError:
     """DuckDB failed while running a query over the data."""
     if file_format == "csv":
         return csv_read_error(exc, shown)
-    return DataError(f"DuckDB could not read {shown!r} as Parquet; {_NOT_SHOWN}")
+    return DataError(
+        f"RowGate could not read {shown!r}: DuckDB failed while reading the Parquet data",
+        duckdb_message=str(exc),
+    )
 
 
 def _metadata_error(exc: duckdb.Error, shown: str) -> DataError:
     # Errors about a Parquet file's metadata (not a Parquet file, a broken
     # footer) hold no row values, so DuckDB's first line is shown.
     detail = database.error_text(exc).splitlines()[0] if str(exc) else "unknown error"
-    return DataError(f"cannot read {shown!r} as Parquet: {detail}")
+    return DataError(f"cannot read {shown!r} as Parquet: {detail}", duckdb_message=str(exc))

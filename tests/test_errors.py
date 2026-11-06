@@ -33,3 +33,30 @@ def test_data_error_renders_its_details_indented() -> None:
     error = DataError("check 3 (not_null): no column 'x'", ["the file has: 'a', 'b'"])
     assert error.lines() == ["error: check 3 (not_null): no column 'x'", "  the file has: 'a', 'b'"]
     assert DataError("plain").lines() == ["error: plain"]
+
+
+def test_errors_without_a_duckdb_message_have_no_hint_or_debug_lines() -> None:
+    error = DataError("plain")
+    assert error.lines() == error.lines(debug=True) == ["error: plain"]
+    assert error.debug_lines() == []
+    assert RulesError("r.yaml", ["bad"]).lines(debug=True) == ["error: r.yaml: bad"]
+
+
+def test_a_duckdb_message_adds_a_hint_and_debug_lines() -> None:
+    error = RowGateError("could not read", duckdb_message="IO Error: one\ntwo")
+    assert error.lines() == [
+        "error: could not read; run again with --debug to see DuckDB's own message, which can "
+        "include data values from the file"
+    ]
+    assert error.lines(debug=True) == ["error: could not read"]
+    assert error.debug_lines() == [
+        "DuckDB's original message (it can include data values from the file):",
+        "  IO Error: one",
+        "  two",
+    ]
+
+
+def test_details_follow_the_hint() -> None:
+    error = DataError("could not read", ["detail"], duckdb_message="x")
+    assert error.lines()[1:] == ["  detail"]
+    assert error.lines()[0].startswith("error: could not read; run again with --debug")

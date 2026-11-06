@@ -668,9 +668,9 @@ def test_a_schema_that_cannot_be_read_is_a_data_error(tmp_path: Path) -> None:
         # A connection that may not read the file at all.
         _describe(database.connect(), source_module.CSV_RELATION, params, "data.csv", "csv")
     assert excinfo.value.message == (
-        "DuckDB could not read 'data.csv' as CSV; RowGate does not show DuckDB's explanation, "
-        "because it can include data values"
+        "RowGate could not read 'data.csv': DuckDB failed without naming a line"
     )
+    assert excinfo.value.duckdb_message is not None
 
 
 def test_columns_are_looked_up_by_exact_name(tmp_path: Path) -> None:
@@ -776,7 +776,10 @@ QUOTE_HINT = (
     "check the quotes on that line: a quoted field must be closed, and only the delimiter "
     "or a line break may follow its closing quote"
 )
-NOT_SHOWN = "RowGate does not show DuckDB's explanation, because it can include data values"
+DEBUG_HINT = (
+    "run again with --debug to see DuckDB's own message, which can include data values "
+    "from the file"
+)
 
 
 @pytest.mark.parametrize(
@@ -843,41 +846,82 @@ def test_a_duckdb_csv_error_names_the_line_but_never_the_row(
 ) -> None:
     # Skip RowGate's own checks so that DuckDB meets the stray quote itself.
     monkeypatch.setattr(source_module, "scan_csv", lambda *args: CsvLayout(["id", "name"], 3, 0))
-    message = data_error(tmp_path, b'id,name\n1,a\n2,"private-value"x\n3,c\n')
-    assert message == f"DuckDB could not read line 3 of 'data.csv' as CSV; {NOT_SHOWN}"
+    (tmp_path / "data.csv").write_bytes(b'id,name\n1,a\n2,"private-value"x\n3,c\n')
+    with pytest.raises(DataError) as excinfo:
+        open_dataset(tmp_path / "rules.yaml", source("data.csv"))
+    error = excinfo.value
+    assert error.lines() == [
+        f"error: DuckDB could not read line 3 of 'data.csv' as CSV; {DEBUG_HINT}"
+    ]
+    # DuckDB's own text, kept for --debug, quotes the row.
+    assert error.duckdb_message is not None
+    assert "private-value" in error.duckdb_message
+
+
+PRIVATE_LINE = (
+    "Invalid Input Error: CSV Error on Line: 7\nOriginal Line: 7,private-value\n"
+    "Value with unterminated quote found.\n\nPossible fixes:\n* Disable strict mode"
+)
 
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        (
-            "Invalid Input Error: CSV Error on Line: 7\nOriginal Line: 7,private-value\n"
-            "Value with unterminated quote found.\n\nPossible fixes:\n* Disable strict mode",
-            f"DuckDB could not read line 7 of 'data.csv' as CSV; {NOT_SHOWN}",
-        ),
+        (PRIVATE_LINE, "DuckDB could not read line 7 of 'data.csv' as CSV"),
         (
             "Invalid Input Error: The CSV Parser state machine reached an invalid state.\n"
             "Possible fixes:\n* Disable the parser's strict mode",
-            f"DuckDB could not read 'data.csv' as CSV; {NOT_SHOWN}",
+            "RowGate could not read 'data.csv': DuckDB failed without naming a line",
+        ),
+        (
+            "Not implemented Error: The Parallel CSV Reader currently does not support a full "
+            "read on this file.",
+            "RowGate could not read 'data.csv': DuckDB failed without naming a line",
         ),
     ],
+    ids=["names-a-line", "no-line", "not-implemented"],
 )
 def test_csv_read_errors_keep_only_the_line_number(raw: str, expected: str) -> None:
-    assert csv_read_error(duckdb.InvalidInputException(raw), "data.csv").message == expected
+    error = csv_read_error(duckdb.InvalidInputException(raw), "data.csv")
+    assert error.message == expected
+    assert error.lines() == [f"error: {expected}; {DEBUG_HINT}"]
+    assert error.duckdb_message == raw
+
+
+def test_debug_output_holds_duckdb_original_message() -> None:
+    error = csv_read_error(duckdb.InvalidInputException(PRIVATE_LINE), "data.csv")
+    assert error.lines(debug=True) == ["error: DuckDB could not read line 7 of 'data.csv' as CSV"]
+    assert error.debug_lines() == [
+        "DuckDB's original message (it can include data values from the file):",
+        "  Invalid Input Error: CSV Error on Line: 7",
+        "  Original Line: 7,private-value",
+        "  Value with unterminated quote found.",
+        "  ",
+        "  Possible fixes:",
+        "  * Disable strict mode",
+    ]
+    assert not any("private-value" in line for line in error.lines())
 
 
 def test_parquet_query_errors_show_no_details() -> None:
-    error = query_error(
-        duckdb.InvalidInputException("bad value 'private-value'"), "d.parquet", "parquet"
-    )
-    assert error.message == f"DuckDB could not read 'd.parquet' as Parquet; {NOT_SHOWN}"
+    raw = "bad value 'private-value'"
+    error = query_error(duckdb.InvalidInputException(raw), "d.parquet", "parquet")
+    assert error.lines() == [
+        "error: RowGate could not read 'd.parquet': DuckDB failed while reading the Parquet "
+        f"data; {DEBUG_HINT}"
+    ]
+    assert error.duckdb_message == raw
 
 
 def test_parquet_metadata_errors_show_duckdb_first_line_only(tmp_path: Path) -> None:
-    message = data_error(tmp_path, b"id,name\n1,a\n", name="data.parquet")
-    assert message.startswith("cannot read 'data.parquet' as Parquet: ")
-    assert "\n" not in message
-    assert "Possible fixes" not in message
+    (tmp_path / "data.parquet").write_bytes(b"id,name\n1,a\n")
+    with pytest.raises(DataError) as excinfo:
+        open_dataset(tmp_path / "rules.yaml", source("data.parquet"))
+    error = excinfo.value
+    assert error.message.startswith("cannot read 'data.parquet' as Parquet: ")
+    assert "\n" not in error.message
+    assert "Possible fixes" not in error.message
+    assert error.duckdb_message is not None  # the full text, for --debug
 
 
 def test_a_parquet_schema_that_cannot_be_described_is_a_data_error(tmp_path: Path) -> None:

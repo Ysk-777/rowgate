@@ -77,7 +77,9 @@ def report_errors(debug: bool) -> Iterator[None]:
     except RowGateError as exc:
         if debug:
             traceback.print_exc()
-        lines = exc.lines()
+            lines = [*exc.debug_lines(), *exc.lines(debug=True)]
+        else:
+            lines = exc.lines()
     except Exception as exc:  # noqa: BLE001 - any bug must still exit 2 without a traceback
         if debug:
             traceback.print_exc()
