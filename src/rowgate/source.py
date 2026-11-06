@@ -66,6 +66,8 @@ _CSV_OPTIONS = ", ".join(
         # line breaks ("does not support a full read on this file"), from
         # about 8 MB. Reading in one thread is slower but always works.
         "parallel := false",
+        # Never decompress because of the file name: d.csv.gz is read as text.
+        "compression := 'none'",
     ]
 )
 CSV_RELATION = f"read_csv($rowgate_path, {_CSV_OPTIONS})"
@@ -77,6 +79,16 @@ PARQUET_RELATION = "read_parquet($rowgate_path, hive_partitioning := false)"
 
 DEFAULT_DELIMITER = ","
 _CHUNK_SIZE = 1 << 20
+# How common compressed files start. Checked only when a file is not valid
+# UTF-8, so a text file is never mistaken for one.
+_COMPRESSED_SIGNATURES = (
+    (b"\x1f\x8b", "gzip"),
+    (b"\x28\xb5\x2f\xfd", "zstd"),
+    (b"BZh", "bzip2"),
+    (b"\xfd7zXZ\x00", "xz"),
+    (b"PK\x03\x04", "zip"),
+    (b"\x04\x22\x4d\x18", "lz4"),
+)
 _ENDING_NAMES = {"\r\n": "CRLF (\\r\\n)", "\n": "LF (\\n)", "\r": "CR (\\r)"}
 _QUOTE_HINT = (
     "check the quotes on that line: a quoted field must be closed, and only the delimiter "
@@ -273,6 +285,12 @@ def scan_csv(path: Path, delimiter: str, shown: str) -> CsvLayout:
                     f"{_QUOTE_HINT}"
                 ) from None
     except UnicodeDecodeError:
+        kind = _compression(path)
+        if kind is not None:
+            raise DataError(
+                f"{shown!r} is a {kind}-compressed file; RowGate reads only uncompressed CSV "
+                "files, so decompress it first"
+            ) from None
         raise DataError(_invalid_utf8_message(path, shown)) from None
     except OSError as exc:
         raise DataError(f"cannot read {shown!r}: {exc.strerror or exc}") from None
@@ -437,6 +455,16 @@ def check_names(names: list[str], shown: str, unnamed: frozenset[int] = frozense
             f"{shown!r} has duplicate column names (compared ignoring case): {listed}; "
             "give every column a different name"
         )
+
+
+def _compression(path: Path) -> str | None:
+    """The compression format a file's first bytes show, if any."""
+    with path.open("rb") as handle:
+        start = handle.read(8)
+    for signature, kind in _COMPRESSED_SIGNATURES:
+        if start.startswith(signature):
+            return kind
+    return None
 
 
 def _invalid_utf8_message(path: Path, shown: str) -> str:

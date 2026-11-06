@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import bz2
 import csv
+import gzip
+import io
+import lzma
 import os
 import re
+import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import duckdb
@@ -1046,3 +1052,58 @@ def test_a_file_the_parallel_reader_gives_up_on_is_read(tmp_path: Path) -> None:
         assert dataset.row_count == expected_rows
         last = dataset.scalar(f"SELECT max(id::INTEGER) FROM {dataset.relation}")  # noqa: S608
         assert last == expected_rows
+
+
+# --- compressed files and file names that look compressed --------------------------------------
+
+
+@pytest.mark.parametrize("name", ["d.csv.gz", "d.csv.zst", "d.gz", "d.csv.bz2"])
+def test_a_compressed_looking_name_does_not_make_rowgate_decompress(
+    tmp_path: Path, name: str
+) -> None:
+    # DuckDB alone picks the compression from the extension and fails on text.
+    with open_file(tmp_path, name, b"id,name\n1,a\n", format="csv") as dataset:
+        assert rows(dataset) == [("1", "a")]
+
+
+def _zip(content: bytes) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("data.csv", content)
+    return buffer.getvalue()
+
+
+CSV_BYTES = b"id,name\n" + b"".join(b"%d,row %d\n" % (i, i) for i in range(200))
+
+
+@pytest.mark.parametrize(
+    ("compress", "kind"),
+    [
+        (gzip.compress, "gzip"),
+        (bz2.compress, "bzip2"),
+        (lzma.compress, "xz"),
+        (_zip, "zip"),
+        # No zstd or lz4 module in the standard library: their frame header
+        # followed by bytes that are not UTF-8 stand in for a real file.
+        (lambda content: b"\x28\xb5\x2f\xfd\xa4\xff\xfe" + content, "zstd"),
+        (lambda content: b"\x04\x22\x4d\x18\x64\xff\xfe" + content, "lz4"),
+    ],
+)
+@pytest.mark.parametrize("name", ["data.csv.gz", "data.csv"])
+def test_a_compressed_file_is_an_error_saying_so(
+    tmp_path: Path, compress: Callable[[bytes], bytes], kind: str, name: str
+) -> None:
+    message = data_error(tmp_path, compress(CSV_BYTES), name=name, format="csv")
+    assert message == (
+        f"{name!r} is a {kind}-compressed file; RowGate reads only uncompressed CSV files, "
+        "so decompress it first"
+    )
+
+
+def test_text_that_starts_like_a_signature_is_still_text(tmp_path: Path) -> None:
+    with open_csv(tmp_path, b"BZh,PK\n1,2\n") as dataset:
+        assert dataset.column_names == ["BZh", "PK"]
+
+
+def test_invalid_utf8_without_a_signature_still_says_utf8(tmp_path: Path) -> None:
+    assert data_error(tmp_path, b"\xff\xfeid\n").startswith("'data.csv' is not valid UTF-8 text")

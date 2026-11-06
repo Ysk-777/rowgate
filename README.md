@@ -83,6 +83,11 @@ DuckDB fixed options, with DuckDB's automatic detection switched off:
 - The file must be UTF-8. A byte-order mark is allowed and is not part of the
   first column name. Invalid UTF-8 is an error that names the line and byte
   offset.
+- Compressed CSV files are not supported. RowGate reads with
+  `compression := 'none'`, so a name like `d.csv.gz` never makes it
+  decompress: plain text with that name (and `format: csv`) is read as text.
+  A file that really is gzip, bzip2, xz, zip, zstd or lz4 compressed is an
+  error (exit 2) that says so.
 - Line endings may be `\n`, `\r\n` or `\r`, but one file must use only one
   kind: DuckDB cannot read a file that mixes them, so RowGate stops with an
   error naming the first line that differs. A line break inside quotes is part
