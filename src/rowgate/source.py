@@ -62,6 +62,10 @@ _CSV_OPTIONS = ", ".join(
         "null_padding := false",
         # A folder named like key=value (year=2024) is not a column.
         "hive_partitioning := false",
+        # DuckDB's parallel CSV reader gives up on some valid files with quoted
+        # line breaks ("does not support a full read on this file"), from
+        # about 8 MB. Reading in one thread is slower but always works.
+        "parallel := false",
     ]
 )
 CSV_RELATION = f"read_csv($rowgate_path, {_CSV_OPTIONS})"

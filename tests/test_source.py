@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 from pathlib import Path
 
 import duckdb
@@ -984,3 +985,64 @@ def test_key_value_folders_do_not_add_csv_columns(tmp_path: Path, folders: str) 
     with open_dataset(folder / "rules.yaml", source("x.csv")) as dataset:
         assert dataset.column_names == ["id", "name"]
         assert rows(dataset) == [("1", "a")]
+
+
+# --- DuckDB's parallel CSV reader ----------------------------------------------------------------
+
+# DuckDB's CSV scanner splits a file into chunks of 8,000,000 bytes. When a
+# chunk starts inside a quoted field that holds a line break, the parallel
+# reader gives up on a perfectly valid file ("does not support a full read on
+# this file"). RowGate reads CSV with parallel := false.
+CHUNK = 8_000_000
+
+
+def quoted_line_break_across_a_chunk() -> tuple[bytes, int]:
+    """A valid CSV file just over 8 MB whose chunk boundary falls inside quotes."""
+    parts = [b"id,text\n"]
+    size = len(parts[0])
+    number = 0
+    while True:
+        number += 1
+        record = (
+            f'{number},"line one {number}\nline two with, comma and ""quotes"" '
+            f'{"x" * (number % 97)}"\n'
+        ).encode()
+        if size + len(record) > CHUNK - 200:
+            break
+        parts.append(record)
+        size += len(record)
+    prefix = f'{number},"line one '.encode()
+    # This record's first line runs across byte 8,000,000. After its quoted
+    # line break comes text that looks like a record of its own, which is what
+    # the reader starting the next chunk cannot make sense of.
+    second_line = b'\nline two with, comma and ""quotes"" end"\n'
+    parts.append(prefix + b"y" * (CHUNK - size - len(prefix) + 50) + second_line)
+    for tail in range(number + 1, number + 50):
+        parts.append(f'{tail},"line one {tail}\nline two with, comma {tail}"\n'.encode())
+    return b"".join(parts), number + 49  # records 1 .. number - 1, the filler, 49 more
+
+
+def test_a_file_the_parallel_reader_gives_up_on_is_read(tmp_path: Path) -> None:
+    content, expected_rows = quoted_line_break_across_a_chunk()
+    path = tmp_path / "data.csv"
+    path.write_bytes(content)
+    assert len(content) > CHUNK
+
+    # The file really does defeat DuckDB's parallel reader, at any thread count.
+    options = re.sub(r", parallel := \w+", "", source_module.CSV_RELATION)
+    parallel = options[:-1] + ", parallel := true)"
+    params: dict[str, object] = {
+        "rowgate_path": str(path),
+        "rowgate_columns": {"id": "VARCHAR", "text": "VARCHAR"},
+        "rowgate_delimiter": ",",
+    }
+    for threads in (1, 4):
+        connection = duckdb.connect(":memory:")
+        connection.execute(f"SET threads = {threads}")
+        with pytest.raises(duckdb.Error):
+            connection.execute(f"SELECT count(*) FROM {parallel}", params).fetchone()  # noqa: S608
+
+    with open_dataset(tmp_path / "rules.yaml", source("data.csv")) as dataset:
+        assert dataset.row_count == expected_rows
+        last = dataset.scalar(f"SELECT max(id::INTEGER) FROM {dataset.relation}")  # noqa: S608
+        assert last == expected_rows

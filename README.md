@@ -90,6 +90,10 @@ DuckDB fixed options, with DuckDB's automatic detection switched off:
 - One record (a line, or several lines inside quotes) may be up to 16 MiB,
   counted in bytes including its line break. A longer record is an error that
   names its line. Long fields are fine within that limit.
+- DuckDB reads CSV files in one thread (`parallel := false`). Its parallel
+  reader gives up on some valid files with line breaks inside quotes once they
+  pass about 8 MB, so RowGate does not use it. This costs time on big files:
+  a 3-check run on a 3-million-row file took 3.3 s instead of 2.5 s.
 - Before checking, RowGate counts the data rows itself and makes sure DuckDB
   read the same number. If they differ, it stops with exit 2 rather than
   check part of the file.
