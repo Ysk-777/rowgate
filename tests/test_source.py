@@ -10,7 +10,7 @@ import lzma
 import os
 import re
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import duckdb
@@ -682,19 +682,33 @@ def test_columns_are_looked_up_by_exact_name(tmp_path: Path) -> None:
 # --- long fields and records -------------------------------------------------------------------
 
 
-def test_a_200_kb_field_is_read_and_the_csv_limit_is_restored(tmp_path: Path) -> None:
-    # Python's csv module refuses fields over 128 KiB unless its limit is raised.
-    before = csv.field_size_limit()
+KNOWN_LIMIT = 54_321  # an unusual value no scan would ever set
+
+
+@pytest.fixture
+def known_csv_limit() -> Iterator[int]:
+    """Set Python's csv field limit to a known value, and put the original back after."""
+    original = csv.field_size_limit(KNOWN_LIMIT)
+    try:
+        yield KNOWN_LIMIT
+    finally:
+        csv.field_size_limit(original)
+
+
+def test_a_200_kb_field_is_read_and_the_csv_limit_is_restored(
+    tmp_path: Path, known_csv_limit: int
+) -> None:
+    # Python's csv module refuses fields over 128 KiB unless its limit is raised,
+    # and the 200 KB field is well over the known limit too.
     with open_csv(tmp_path, b"id,blob\n1," + b"x" * 200_000 + b"\n") as dataset:
         assert dataset.row_count == 1
         assert dataset.scalar(f"SELECT length(blob) FROM {dataset.relation}") == 200_000  # noqa: S608
-    assert csv.field_size_limit() == before
+    assert csv.field_size_limit() == known_csv_limit
 
 
-def test_the_csv_limit_is_restored_after_an_error(tmp_path: Path) -> None:
-    before = csv.field_size_limit()
+def test_the_csv_limit_is_restored_after_an_error(tmp_path: Path, known_csv_limit: int) -> None:
     data_error(tmp_path, b"id,blob\n1," + b"x" * 200_000 + b",extra\n")
-    assert csv.field_size_limit() == before
+    assert csv.field_size_limit() == known_csv_limit
 
 
 def test_a_3_mb_field_is_read(tmp_path: Path) -> None:
