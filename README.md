@@ -52,6 +52,11 @@ not refer to the list or mapping that contains it.
 - A zero-byte file is an error (exit 2).
 - The format comes from `source.format`, or else from the extension: `.csv`
   or `.parquet`, in any letter case.
+- Folders named like `key=value` (for example `year=2024`, anywhere in the
+  path) are just folders. DuckDB would otherwise add a `year` column to the
+  data (Hive partitioning), so RowGate reads both formats with
+  `hive_partitioning := false`. A check on such a column is an error (exit 2)
+  for a missing column.
 
 ### CSV files
 

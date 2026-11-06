@@ -60,13 +60,16 @@ _CSV_OPTIONS = ", ".join(
         "allow_quoted_nulls := false",
         "comment := ''",
         "null_padding := false",
+        # A folder named like key=value (year=2024) is not a column.
+        "hive_partitioning := false",
     ]
 )
 CSV_RELATION = f"read_csv($rowgate_path, {_CSV_OPTIONS})"
 CSV_RELATION_LONG_RECORDS = (
     f"read_csv($rowgate_path, {_CSV_OPTIONS}, max_line_size := {_DUCKDB_MAX_LINE_SIZE})"
 )
-PARQUET_RELATION = "read_parquet($rowgate_path)"
+# hive_partitioning off: a folder named like key=value (year=2024) is not a column.
+PARQUET_RELATION = "read_parquet($rowgate_path, hive_partitioning := false)"
 
 DEFAULT_DELIMITER = ","
 _CHUNK_SIZE = 1 << 20

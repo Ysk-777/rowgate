@@ -380,3 +380,26 @@ def test_negative_and_positive_zero_are_duplicates(tmp_path: Path) -> None:
 def test_nan_in_csv_is_just_text(tmp_path: Path) -> None:
     result = only(run(tmp_path, "  - {rule: unique, column: v}\n", b"v\nNaN\nnan\nNaN\n"))
     assert result.failing_rows == 2  # the two "NaN" texts; "nan" differs in case
+
+
+@pytest.mark.parametrize("name", ["data.parquet", "data.csv"])
+@pytest.mark.parametrize("folders", ["year=2024", "year=2024/month=01/day"])
+def test_a_key_value_folder_is_not_a_column_to_check(
+    tmp_path: Path, name: str, folders: str
+) -> None:
+    # DuckDB's Hive partitioning would add a "year" column from the folder name.
+    folder = tmp_path / folders
+    folder.mkdir(parents=True)
+    if name.endswith(".parquet"):
+        duckdb.connect(":memory:").execute(
+            f"COPY (SELECT 1 AS id, 'a' AS b, 2 AS c) TO '{folder / name}' (FORMAT parquet)"
+        )
+    else:
+        (folder / name).write_bytes(b"id,b,c\n1,a,2\n")
+    with pytest.raises(DataError) as excinfo:
+        run(folder, "  - {rule: not_null, column: year}\n", name=name)
+    assert excinfo.value.lines() == [
+        f"error: a check refers to a column that {name!r} does not have",
+        "  check 1 (not_null): no column 'year'",
+        "  the file has 3 columns: 'id', 'b', 'c'",
+    ]

@@ -959,3 +959,28 @@ def test_long_records_and_trailing_blank_lines_together(tmp_path: Path) -> None:
         assert "max_line_size" in dataset.relation
         assert "LIMIT" in dataset.relation
         assert dataset.row_count == 2
+
+
+# --- folders named like key=value ----------------------------------------------------------------
+
+HIVE_FOLDERS = ["year=2024", "region=eu/2024/q1", "a=1/b=2"]
+
+
+@pytest.mark.parametrize("folders", HIVE_FOLDERS, ids=["parent", "grandparent", "both"])
+def test_key_value_folders_do_not_add_parquet_columns(tmp_path: Path, folders: str) -> None:
+    folder = tmp_path / folders
+    folder.mkdir(parents=True)
+    write_parquet(folder / "x.parquet", "SELECT 1 AS id, 'a' AS name")
+    with open_dataset(folder / "rules.yaml", source("x.parquet")) as dataset:
+        assert dataset.column_names == ["id", "name"]
+        assert dataset.row_count == 1
+
+
+@pytest.mark.parametrize("folders", HIVE_FOLDERS, ids=["parent", "grandparent", "both"])
+def test_key_value_folders_do_not_add_csv_columns(tmp_path: Path, folders: str) -> None:
+    folder = tmp_path / folders
+    folder.mkdir(parents=True)
+    (folder / "x.csv").write_bytes(b"id,name\n1,a\n")
+    with open_dataset(folder / "rules.yaml", source("x.csv")) as dataset:
+        assert dataset.column_names == ["id", "name"]
+        assert rows(dataset) == [("1", "a")]
