@@ -49,7 +49,10 @@ N from 1 to 1000; anything else is a usage error, exit 2).
 the output, error messages included: no samples are collected, an
 unexpected internal error is reported by its type only, and `--debug` (which
 can print DuckDB's own messages) cannot be combined with it (exit 2). If both
-are given, `--no-samples` wins over `--max-samples`.
+are given, `--no-samples` wins over `--max-samples`. Column names, the file
+path and the values in your rules file are still shown: they are not data.
+This is tested by putting a marker string in the data of every rule and of
+every kind of unreadable file, and checking it never reaches stdout or stderr.
 
 ## Writing values in the rules file
 
