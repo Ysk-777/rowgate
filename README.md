@@ -52,6 +52,9 @@ not refer to the list or mapping that contains it.
   treats these as file patterns even in a quoted path (`a[1].csv` would read
   `a1.csv`), and reading several files is not supported yet.
 - A zero-byte file is an error (exit 2).
+- Error messages show paths as you wrote them (the rules file as given on
+  the command line, the data file as written in the rules), never resolved
+  to an absolute path, so CI logs do not reveal your folders or user name.
 - The format comes from `source.format`, or else from the extension: `.csv`
   or `.parquet`, in any letter case.
 - Folders named like `key=value` (for example `year=2024`, anywhere in the

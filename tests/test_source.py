@@ -77,11 +77,9 @@ def test_glob_characters_in_the_folder_path_are_refused(tmp_path: Path) -> None:
     (folder / "data.csv").write_bytes(b"id\n1\n")
     with pytest.raises(DataError) as excinfo:
         open_dataset(folder / "rules.yaml", source("data.csv"))
-    message = excinfo.value.message
-    assert message.startswith("the full path of 'data.csv' is ")
-    assert message.endswith(
-        "which contains '['; DuckDB would read it as a file pattern, so move the file to a "
-        "folder without these characters"
+    assert excinfo.value.message == (
+        "a folder above 'data.csv' has '[' in its name; DuckDB would read the full path as a "
+        "file pattern, so move the files to a folder without these characters"
     )
 
 
@@ -552,8 +550,9 @@ def test_a_zero_byte_parquet_file_is_an_error(tmp_path: Path) -> None:
 
 
 def test_a_file_that_is_not_parquet_is_an_error(tmp_path: Path) -> None:
-    message = data_error(tmp_path, b"id,name\n1,a\n", name="data.parquet")
-    assert message.startswith("cannot read 'data.parquet' as Parquet: ")
+    assert data_error(tmp_path, b"id,name\n1,a\n", name="data.parquet") == (
+        "cannot read 'data.parquet' as Parquet"
+    )
 
 
 # --- finding the file ------------------------------------------------------------------------
@@ -579,8 +578,28 @@ def test_an_absolute_path_is_used_as_is(tmp_path: Path) -> None:
 def test_a_missing_file(tmp_path: Path) -> None:
     with pytest.raises(DataError) as excinfo:
         open_dataset(tmp_path / "rules.yaml", source("nope.csv"))
+    rules = tmp_path / "rules.yaml"
     assert excinfo.value.message == (
-        f"data file 'nope.csv' not found (looked for {(tmp_path / 'nope.csv').resolve()})"
+        f"data file 'nope.csv' not found, relative to the rules file {str(rules)!r}"
+    )
+
+
+def test_a_missing_file_given_as_an_absolute_path(tmp_path: Path) -> None:
+    missing = str(tmp_path / "nope.csv")
+    with pytest.raises(DataError) as excinfo:
+        open_dataset(Path("rules.yaml"), source(missing))
+    assert excinfo.value.message == f"data file {missing!r} not found"
+
+
+def test_a_missing_file_message_does_not_show_where_rowgate_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The rules path is shown as the user typed it, not resolved to an absolute path.
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(DataError) as excinfo:
+        open_dataset(Path("rules.yaml"), source("nope.csv"))
+    assert excinfo.value.message == (
+        "data file 'nope.csv' not found, relative to the rules file 'rules.yaml'"
     )
 
 
@@ -918,10 +937,67 @@ def test_parquet_metadata_errors_show_duckdb_first_line_only(tmp_path: Path) -> 
     with pytest.raises(DataError) as excinfo:
         open_dataset(tmp_path / "rules.yaml", source("data.parquet"))
     error = excinfo.value
-    assert error.message.startswith("cannot read 'data.parquet' as Parquet: ")
-    assert "\n" not in error.message
-    assert "Possible fixes" not in error.message
-    assert error.duckdb_message is not None  # the full text, for --debug
+    assert error.message == "cannot read 'data.parquet' as Parquet"
+    assert error.duckdb_summary  # DuckDB's first line, as RowGate shows it
+    [line] = error.lines()
+    assert line == f"error: cannot read 'data.parquet' as Parquet: {error.duckdb_summary}"
+    assert "Possible fixes" not in line
+
+
+def test_parquet_metadata_errors_never_show_the_absolute_path(tmp_path: Path) -> None:
+    folder = tmp_path / "home" / "some-user" / "project"
+    folder.mkdir(parents=True)
+    (folder / "data.parquet").write_bytes(b"id,name\n1,a\n")
+    with pytest.raises(DataError) as excinfo:
+        open_dataset(folder / "rules.yaml", source("data.parquet"))
+    error = excinfo.value
+    for debug in (False, True):
+        printed = "\n".join([*error.lines(debug), str(error)])
+        assert str(tmp_path) not in printed
+        assert "some-user" not in printed
+
+
+@pytest.mark.parametrize(
+    "absolute",
+    ["/home/some-user/project/d.parquet", "C:\\Users\\some-user\\project\\d.parquet"],
+    ids=["posix", "windows"],
+)
+@pytest.mark.parametrize("form", ["as-given", "forward-slashes"])
+def test_the_absolute_path_is_replaced_in_any_form(absolute: str, form: str) -> None:
+    quoted = absolute if form == "as-given" else absolute.replace("\\", "/")
+    error = _metadata_error(
+        duckdb.IOException(f"IO Error: No magic bytes found at end of file '{quoted}'"),
+        "d.parquet",
+        absolute,
+    )
+    assert error.lines() == [
+        "error: cannot read 'd.parquet' as Parquet: No magic bytes found at end of file 'd.parquet'"
+    ]
+
+
+def test_a_one_line_duckdb_message_is_shown_once_even_with_debug() -> None:
+    error = _metadata_error(
+        duckdb.IOException("IO Error: File too small"), "d.parquet", "/abs/d.parquet"
+    )
+    assert error.duckdb_message is None  # nothing more to show with --debug
+    assert error.debug_lines() == []
+    assert error.lines(debug=True) == ["error: cannot read 'd.parquet' as Parquet: File too small"]
+    assert str(error) == "cannot read 'd.parquet' as Parquet"  # the traceback's last line
+
+
+def test_a_longer_duckdb_message_is_printed_in_full_only_with_debug() -> None:
+    raw = "Invalid Error: broken footer in '/abs/d.parquet'\nmore detail"
+    error = _metadata_error(duckdb.InvalidInputException(raw), "d.parquet", "/abs/d.parquet")
+    assert error.lines() == [
+        "error: cannot read 'd.parquet' as Parquet: broken footer in 'd.parquet'; run again "
+        "with --debug to see DuckDB's own message, which can include data values from the file"
+    ]
+    # With --debug, DuckDB's words appear once: in the full message, not again after it.
+    assert error.lines(debug=True) == ["error: cannot read 'd.parquet' as Parquet"]
+    assert error.debug_lines()[1:] == [
+        "  Invalid Error: broken footer in '/abs/d.parquet'",
+        "  more detail",
+    ]
 
 
 def test_a_parquet_schema_that_cannot_be_described_is_a_data_error(tmp_path: Path) -> None:
@@ -930,13 +1006,13 @@ def test_a_parquet_schema_that_cannot_be_described_is_a_data_error(tmp_path: Pat
         _describe(
             database.connect(), source_module.PARQUET_RELATION, params, "d.parquet", "parquet"
         )
-    assert excinfo.value.message.startswith("cannot read 'd.parquet' as Parquet: ")
+    assert excinfo.value.message == "cannot read 'd.parquet' as Parquet"
 
 
 def test_a_parquet_metadata_error_without_text() -> None:
-    assert _metadata_error(duckdb.IOException(""), "d.parquet").message == (
-        "cannot read 'd.parquet' as Parquet: unknown error"
-    )
+    assert _metadata_error(duckdb.IOException(""), "d.parquet", "/abs/d.parquet").lines() == [
+        "error: cannot read 'd.parquet' as Parquet: unknown error"
+    ]
 
 
 # --- blank lines at the end of a file ------------------------------------------------------------

@@ -21,7 +21,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import TracebackType
 from typing import Self, TextIO
 
@@ -246,14 +246,17 @@ def resolve_data_path(rules_path: Path, source: Source) -> Path:
     shown = source.path
     given = Path(source.path)
     path = (given if given.is_absolute() else rules_path.parent / given).resolve()
+    # Messages never print the absolute path: in CI logs it would show the
+    # user's folders and user name. They use the paths as the user wrote them.
     glob = glob_characters(str(path))
     if glob:
         raise DataError(
-            f"the full path of {shown!r} is {path}, which contains {glob}; DuckDB would read "
-            "it as a file pattern, so move the file to a folder without these characters"
+            f"a folder above {shown!r} has {glob} in its name; DuckDB would read the full "
+            "path as a file pattern, so move the files to a folder without these characters"
         )
     if not path.exists():
-        raise DataError(f"data file {shown!r} not found (looked for {path})")
+        where = "" if given.is_absolute() else f", relative to the rules file {str(rules_path)!r}"
+        raise DataError(f"data file {shown!r} not found{where}")
     if path.is_dir():
         raise DataError(f"{shown!r} is a directory, not a data file")
     if not path.is_file():
@@ -514,7 +517,7 @@ def _parquet_names(
             "SELECT name, num_children FROM parquet_schema($rowgate_path)", params
         ).fetchall()
     except duckdb.Error as exc:
-        raise _metadata_error(exc, shown) from None
+        raise _metadata_error(exc, shown, str(params["rowgate_path"])) from None
     names: list[str] = []
     index = 1  # row 0 is the schema root
     for _ in range(rows[0][1] or 0):
@@ -540,7 +543,7 @@ def _describe(
     except duckdb.Error as exc:
         if file_format == "csv":
             raise csv_read_error(exc, shown) from None
-        raise _metadata_error(exc, shown) from None
+        raise _metadata_error(exc, shown, str(params["rowgate_path"])) from None
     return [Column(name, column_type) for name, column_type in rows]
 
 
@@ -582,8 +585,20 @@ def query_error(exc: duckdb.Error, shown: str, file_format: FileFormat) -> DataE
     )
 
 
-def _metadata_error(exc: duckdb.Error, shown: str) -> DataError:
-    # Errors about a Parquet file's metadata (not a Parquet file, a broken
-    # footer) hold no row values, so DuckDB's first line is shown.
-    detail = database.error_text(exc).splitlines()[0] if str(exc) else "unknown error"
-    return DataError(f"cannot read {shown!r} as Parquet: {detail}", duckdb_message=str(exc))
+def _metadata_error(exc: duckdb.Error, shown: str, absolute: str) -> DataError:
+    """DuckDB could not read a Parquet file's metadata (not Parquet, a broken footer).
+
+    These errors hold no row values, so DuckDB's first line is shown, with the
+    absolute path replaced by the path as written in the rules file. The full
+    text is kept for --debug only when it says more than that line.
+    """
+    text = str(exc)
+    first = database.error_text(exc).splitlines()[0] if text else "unknown error"
+    for form in {absolute, absolute.replace("\\", "/"), PurePath(absolute).as_posix()}:
+        first = first.replace(form, shown)
+    more = len(text.splitlines()) > 1
+    return DataError(
+        f"cannot read {shown!r} as Parquet",
+        duckdb_summary=first,
+        duckdb_message=text if more else None,
+    )

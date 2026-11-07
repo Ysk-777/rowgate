@@ -106,7 +106,23 @@ def test_a_missing_data_file_exits_with_code_2(tmp_path: Path) -> None:
     rules.write_text(RULES, encoding="utf-8")
     code, out, err = run("check", str(rules))
     assert (code, out) == (2, "")
-    assert err.startswith("error: data file 'orders.csv' not found (looked for ")
+    assert err == (
+        f"error: data file 'orders.csv' not found, relative to the rules file {str(rules)!r}\n"
+    )
+
+
+def test_a_parquet_error_with_debug_prints_duckdb_words_once(tmp_path: Path) -> None:
+    (tmp_path / "orders.parquet").write_bytes(b"order_id\n1\n")
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(RULES.replace("orders.csv", "orders.parquet"), encoding="utf-8")
+    _, _, plain = run("check", str(rules))
+    code, _, err = run("check", str(rules), "--debug")
+    assert code == 2
+    summary = plain.removeprefix("error: cannot read 'orders.parquet' as Parquet: ").strip()
+    assert summary
+    assert err.count(summary) == 1
+    assert err.endswith(f"error: cannot read 'orders.parquet' as Parquet: {summary}\n")
+    assert str(tmp_path) not in plain
 
 
 def test_unreadable_data_exits_with_code_2(tmp_path: Path) -> None:
