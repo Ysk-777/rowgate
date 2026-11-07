@@ -73,6 +73,25 @@ Only lowercase `true` and `false` are booleans, and only plain decimal numbers
 The rules file must also not nest more than 50 levels deep, and an alias may
 not refer to the list or mapping that contains it.
 
+## The rules
+
+Every rule except `not_null` ignores NULL values. An empty text (`""` in a
+CSV file) is a value, not NULL, so it is checked like any other value.
+
+### regex
+
+The pattern must match the **whole** value, as if it were wrapped in `^` and
+`$` (which you may still write). Patterns use RE2, the regular expression
+engine in DuckDB, with no flags: matching is case-sensitive, and `(?i)` at
+the start of the pattern makes it ignore case. RE2 has no lookarounds or
+backreferences; an invalid pattern is a rules error that `rowgate validate`
+reports.
+
+A column that is not text (in a Parquet file) is matched on DuckDB's text
+form of each value. For a `DOUBLE` column that means `100.0`, `1.5`,
+`1e+20` and `nan`, so `[0-9]+[.][0-9]+` matches the first two but not
+`1e+20`. Dates are matched as `2024-01-31`, booleans as `true` and `false`.
+
 ## How RowGate reads data
 
 ### Finding the file

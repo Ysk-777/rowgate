@@ -98,7 +98,7 @@ class Report:
         return 1 if self.count("failed") else 0
 
 
-NOT_AVAILABLE_YET = (InSet, Range, Regex)
+NOT_AVAILABLE_YET = (InSet, Range)
 
 
 def run_checks(
@@ -307,8 +307,15 @@ def _row_result(
     samples: tuple[Sample, ...] | None,
 ) -> CheckResult:
     of_rows = f"{failing} of {_plural(dataset.row_count, 'row')}"
-    verb = "is" if failing == 1 else "are"
-    summary = f"{of_rows} {verb} NULL" if failing else "no NULL values"
+    one = failing == 1
+    if isinstance(check, Regex):
+        summary = (
+            f"{of_rows} {'does' if one else 'do'} not match the pattern"
+            if failing
+            else "every value matches the pattern"
+        )
+    else:
+        summary = f"{of_rows} {'is' if one else 'are'} NULL" if failing else "no NULL values"
     more = failing - len(samples) if samples is not None else 0
     text = type_family(_type_of(dataset, check.column)) == "text"
     return CheckResult(

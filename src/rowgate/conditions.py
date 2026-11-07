@@ -53,7 +53,7 @@ def type_family(column_type: str) -> Family:
 
 def type_problem(check: RowRule, column_type: str) -> str | None:
     """Why ``check`` cannot run on a column of this type, or None if it can."""
-    return None  # not_null runs on any column
+    return None  # not_null and regex run on any column
 
 
 @dataclass(frozen=True)
@@ -75,4 +75,12 @@ def row_test(index: int, check: RowRule, column_type: str) -> RowTest:
     shown = column if family == "text" else f"CAST({column} AS VARCHAR)"
     if isinstance(check, NotNull):
         return RowTest(f"{column} IS NULL", shown, {})
+    if isinstance(check, Regex):
+        # Full match with RE2 and no flags, on the DuckDB text form of the value.
+        name = f"c{index}_pattern"
+        return RowTest(
+            f"{column} IS NOT NULL AND NOT regexp_full_match({shown}, ${name})",
+            shown,
+            {name: check.pattern},
+        )
     raise AssertionError(f"{check.rule} is not available yet")  # refused before the run

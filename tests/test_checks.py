@@ -249,10 +249,10 @@ def test_rules_from_a_later_milestone_are_refused_before_reading(tmp_path: Path)
     with pytest.raises(RowGateError) as excinfo:
         run(
             tmp_path,
-            "  - {rule: not_null, column: id}\n  - {rule: regex, column: id, pattern: x}\n",
+            "  - {rule: not_null, column: id}\n  - {rule: in_set, column: id, values: [x]}\n",
         )
     assert excinfo.value.message == (
-        "check 2 (regex): this rule is not available yet in this development version of RowGate"
+        "check 2 (in_set): this rule is not available yet in this development version of RowGate"
     )
 
 
@@ -536,3 +536,77 @@ def test_parquet_samples_use_duckdb_text_form(tmp_path: Path) -> None:
 )
 def test_type_families(column_type: str, family: str) -> None:
     assert type_family(column_type) == family
+
+
+# --- regex ----------------------------------------------------------------------------------
+
+
+def regex(pattern: str, column: str = "v") -> str:
+    return f"  - {{rule: regex, column: {column}, pattern: '{pattern}'}}\n"
+
+
+def test_regex_must_match_the_whole_value(tmp_path: Path) -> None:
+    data = b"v\nABC-1234\nABC-12345\nxABC-1234\nABC-1234\n"
+    result = only(run(tmp_path, regex("[A-Z]{3}-[0-9]{4}"), data))
+    assert result.failing_rows == 2
+    assert [(s.row, s.value) for s in result.samples or ()] == [(2, "ABC-12345"), (3, "xABC-1234")]
+    assert result.summary == "2 of 4 rows do not match the pattern"
+
+
+def test_regex_anchors_change_nothing(tmp_path: Path) -> None:
+    data = b"v\nABC-1234\nABC-12345\n"
+    plain = only(run(tmp_path, regex("[A-Z]{3}-[0-9]{4}"), data)).failing_rows
+    anchored = only(run(tmp_path / ".." / tmp_path.name, regex("^[A-Z]{3}-[0-9]{4}$"), data))
+    assert plain == anchored.failing_rows == 1
+
+
+def test_regex_is_case_sensitive_with_no_flags(tmp_path: Path) -> None:
+    data = b"v\nabc\nABC\n"
+    assert only(run(tmp_path, regex("abc"), data)).failing_rows == 1
+    # RE2's inline flag in the pattern itself is the way to ignore case.
+    insensitive = only(run(tmp_path / ".." / tmp_path.name, regex("(?i)abc"), data))
+    assert insensitive.failing_rows == 0
+
+
+def test_regex_ignores_nulls_but_not_empty_text(tmp_path: Path) -> None:
+    data = b'v\nok\n\n""\nok\n'
+    result = only(run(tmp_path, regex("ok"), data))
+    assert result.failing_rows == 1  # the empty text; the NULL is ignored
+    assert [(s.row, s.value) for s in result.samples or ()] == [(3, "")]
+
+
+def test_regex_one_failure_is_singular_and_passes_are_worded(tmp_path: Path) -> None:
+    assert only(run(tmp_path, regex("a"), b"v\na\nb\n")).summary == (
+        "1 of 2 rows does not match the pattern"
+    )
+    passed = only(run(tmp_path / ".." / tmp_path.name, regex("[ab]"), b"v\na\nb\n"))
+    assert (passed.ok, passed.summary) == (True, "every value matches the pattern")
+
+
+def test_regex_matches_unicode_characters(tmp_path: Path) -> None:
+    data = "v\nCafé\nCafe\n".encode()
+    assert only(run(tmp_path, regex("Caf."), data)).failing_rows == 0
+
+
+@pytest.mark.parametrize(
+    ("select", "pattern", "failing_values"),
+    [
+        # A DOUBLE is matched on DuckDB's text form: 100.0, 1.5 and 1e+20.
+        ("100.0::DOUBLE, 1.5::DOUBLE, 1e20::DOUBLE", "[0-9]+[.][0-9]+", ["1e+20"]),
+        ("7::INTEGER, 42::INTEGER, -3::INTEGER", "[0-9]+", ["-3"]),
+        ("DATE '2024-01-31', DATE '2024-02-01', DATE '2023-12-31'", "2024-.*", ["2023-12-31"]),
+        ("true, false, true", "true", ["false"]),
+    ],
+    ids=["double", "integer", "date", "boolean"],
+)
+def test_regex_on_non_text_parquet_columns_uses_duckdb_text_form(
+    tmp_path: Path, select: str, pattern: str, failing_values: list[str]
+) -> None:
+    target = tmp_path / "data.parquet"
+    rows = ", ".join(f"({value})" for value in select.split(", "))
+    duckdb.connect(":memory:").execute(
+        f"COPY (SELECT * FROM (VALUES {rows}) t(x)) TO '{target}' (FORMAT parquet)"  # noqa: S608 - test data
+    )
+    result = only(run(tmp_path, regex(pattern, "x"), name="data.parquet"))
+    assert [s.value for s in result.samples or ()] == failing_values
+    assert not result.text_values
