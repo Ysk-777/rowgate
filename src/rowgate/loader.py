@@ -18,6 +18,7 @@ from pydantic_core import ErrorDetails
 from yaml.composer import ComposerError
 from yaml.constructor import ConstructorError
 
+from rowgate import display
 from rowgate.errors import RulesError
 from rowgate.rules import RULE_MODELS, RulesFile, Source, describe_value
 
@@ -161,7 +162,7 @@ class _RulesLoader(yaml.SafeLoader):
             raise
         except (ValueError, KeyError, AttributeError, TypeError, OverflowError) as exc:
             tag = node.tag.rsplit(":", 1)[-1]
-            shown = f"{node.value!r} " if isinstance(node, yaml.ScalarNode) else ""
+            shown = f"{display.quoted(node.value)} " if isinstance(node, yaml.ScalarNode) else ""
             raise ConstructorError(
                 None, None, f"cannot read the value {shown}as {tag}: {exc}", node.start_mark
             ) from None
@@ -187,7 +188,7 @@ def _construct_mapping(loader: _RulesLoader, node: yaml.MappingNode) -> Iterator
             raise ConstructorError(
                 "while constructing a mapping",
                 node.start_mark,
-                f"found duplicate key {key!r}",
+                f"found duplicate key {display.shown(key)}",
                 key_node.start_mark,
             )
         seen.add(key)
@@ -426,7 +427,7 @@ def _choices(model: type[BaseModel] | None, field: str | None) -> str:
     values: list[object] = []
     if model is not None and field in model.model_fields:
         values = _literal_values(model.model_fields[field].annotation)
-    quoted = [repr(value) for value in values] or ["an allowed value"]
+    quoted = [display.shown(value) for value in values] or ["an allowed value"]
     if len(quoted) == 1:
         return quoted[0]
     return ", ".join(quoted[:-1]) + " or " + quoted[-1]
@@ -458,4 +459,4 @@ def _unknown_rule(value: object) -> str:
         return f"field 'rule' must be the name of a rule, got {describe_value(rule)}"
     close = difflib.get_close_matches(rule, list(RULE_MODELS), n=1)
     hint = f" (did you mean '{close[0]}'?)" if close else ""
-    return f"unknown rule {rule!r}{hint}; known rules: {known}"
+    return f"unknown rule {display.shown(rule)}{hint}; known rules: {known}"

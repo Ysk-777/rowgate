@@ -23,6 +23,7 @@ from pydantic import (
 )
 
 from rowgate.database import regex_error
+from rowgate.display import quoted
 
 Severity = Literal["error", "warn"]
 FileFormat = Literal["csv", "parquet"]
@@ -64,7 +65,7 @@ def describe_value(value: object) -> str:
         return f"number {value}"
     if isinstance(value, str):
         shown = value if len(value) <= _MAX_SHOWN else value[: _MAX_SHOWN - 3] + "..."
-        return f"string {shown!r}"
+        return f"string {quoted(shown)}"
     if isinstance(value, datetime):
         return f"timestamp {value.isoformat(sep=' ')}"
     if isinstance(value, date):
@@ -137,7 +138,7 @@ class Source(_StrictModel):
         suffix = PurePath(path).suffix.lower()
         guessed = FORMAT_BY_EXTENSION.get(suffix)
         if guessed is None:
-            what = f"the extension {suffix!r}" if suffix else "a path without an extension"
+            what = f"the extension {quoted(suffix)}" if suffix else "a path without an extension"
             raise ValueError(
                 f"cannot tell the file format from {what}; set format: csv or format: parquet"
             )
@@ -292,7 +293,7 @@ def _range_bound(value: object) -> RangeBound:
         try:
             return date.fromisoformat(value)
         except ValueError:
-            raise ValueError(f"{value!r} is not a valid calendar date") from None
+            raise ValueError(f"{quoted(value)} is not a valid calendar date") from None
     raise ValueError(f"expected a number or a date (YYYY-MM-DD), got {describe_value(value)}")
 
 

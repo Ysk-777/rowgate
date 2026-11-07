@@ -19,6 +19,7 @@ import pytest
 
 from rowgate import database
 from rowgate import source as source_module
+from rowgate.display import quoted
 from rowgate.errors import DataError
 from rowgate.rules import Source
 from rowgate.source import (
@@ -581,7 +582,7 @@ def test_a_missing_file(tmp_path: Path) -> None:
         open_dataset(tmp_path / "rules.yaml", source("nope.csv"))
     rules = tmp_path / "rules.yaml"
     assert excinfo.value.message == (
-        f"data file 'nope.csv' not found, relative to the rules file {str(rules)!r}"
+        f"data file 'nope.csv' not found, relative to the rules file {quoted(str(rules))}"
     )
 
 
@@ -589,7 +590,7 @@ def test_a_missing_file_given_as_an_absolute_path(tmp_path: Path) -> None:
     missing = str(tmp_path / "nope.csv")
     with pytest.raises(DataError) as excinfo:
         open_dataset(Path("rules.yaml"), source(missing))
-    assert excinfo.value.message == f"data file {missing!r} not found"
+    assert excinfo.value.message == f"data file {quoted(missing)} not found"
 
 
 def test_a_missing_file_message_does_not_show_where_rowgate_runs(
@@ -1252,7 +1253,7 @@ def test_a_compressed_file_is_an_error_saying_so(
 ) -> None:
     message = data_error(tmp_path, compress(CSV_BYTES), name=name, format="csv")
     assert message == (
-        f"{name!r} is a {kind}-compressed file; RowGate reads only uncompressed CSV files, "
+        f"{quoted(name)} is a {kind}-compressed file; RowGate reads only uncompressed CSV files, "
         "so decompress it first"
     )
 

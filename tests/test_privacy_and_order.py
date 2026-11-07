@@ -15,6 +15,7 @@ from rowgate import cli
 from rowgate import source as source_module
 from rowgate.checks import run_checks
 from rowgate.cli import app
+from rowgate.display import quoted
 from rowgate.loader import load_rules
 from rowgate.rules import Source
 from rowgate.source import CsvLayout, open_dataset
@@ -302,7 +303,7 @@ def test_a_parquet_column_named_file_row_number_cannot_have_samples(
     code, output = cli_output("check", str(rules))
     assert code == 2
     assert output == (
-        f"error: cannot show samples for 'data.parquet': it has a column named {name!r}, the "
+        f"error: cannot show samples for 'data.parquet': it has a column named {quoted(name)}, the "
         "name DuckDB gives the row numbers that samples show; run with --no-samples, or rename "
         "the column\n"
     )

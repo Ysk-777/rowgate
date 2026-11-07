@@ -28,6 +28,7 @@ from typing import Self, TextIO
 import duckdb
 
 from rowgate import database
+from rowgate.display import quoted
 from rowgate.errors import DataError
 from rowgate.rules import FileFormat, Source, glob_characters
 
@@ -182,9 +183,9 @@ class Dataset:
         for name in self.column_names:
             if name.translate(_ASCII_LOWER) == PARQUET_ROW_NUMBER:
                 raise DataError(
-                    f"cannot show samples for {self.shown!r}: it has a column named {name!r}, "
-                    "the name DuckDB gives the row numbers that samples show; run with "
-                    "--no-samples, or rename the column"
+                    f"cannot show samples for {quoted(self.shown)}: it has a column named "
+                    f"{quoted(name)}, the name DuckDB gives the row numbers that samples show; "
+                    "run with --no-samples, or rename the column"
                 )
 
     def scalar(self, sql: str, params: dict[str, object] | None = None) -> object:
@@ -200,7 +201,7 @@ class Dataset:
         except duckdb.Error as exc:
             raise query_error(exc, self.shown, self.file_format) from None
         if found is None:
-            raise DataError(f"DuckDB returned no result for {self.shown!r}")
+            raise DataError(f"DuckDB returned no result for {quoted(self.shown)}")
         return tuple(found)
 
     def close(self) -> None:
@@ -241,11 +242,11 @@ def open_dataset(rules_path: Path, source: Source) -> Dataset:
         count_sql = f"SELECT count(*) FROM {relation}"  # noqa: S608
         row_count = _scalar(connection, count_sql, params, shown, source.file_format)
         if not isinstance(row_count, int):
-            raise DataError(f"DuckDB returned no row count for {shown!r}")
+            raise DataError(f"DuckDB returned no row count for {quoted(shown)}")
         if source.file_format == "csv":
             if [c.name for c in columns] != layout.header:
                 raise DataError(
-                    f"DuckDB read different column names from {shown!r} than its header"
+                    f"DuckDB read different column names from {quoted(shown)} than its header"
                 )
             relation, row_count = _without_trailing_blank_lines(
                 layout, relation, row_count, params, shown
@@ -277,7 +278,8 @@ def _without_trailing_blank_lines(
     blank_rows = layout.trailing_blank_lines if one_column else 0
     if duckdb_rows - blank_rows != layout.rows:
         raise DataError(
-            f"{shown!r} has {layout.rows} data rows, but DuckDB read {duckdb_rows - blank_rows}; "
+            f"{quoted(shown)} has {layout.rows} data rows, "
+            f"but DuckDB read {duckdb_rows - blank_rows}; "
             "RowGate stops rather than check a partial file"
         )
     if not blank_rows:
@@ -298,18 +300,20 @@ def resolve_data_path(rules_path: Path, source: Source) -> Path:
     glob = glob_characters(str(path))
     if glob:
         raise DataError(
-            f"a folder above {shown!r} has {glob} in its name; DuckDB would read the full "
+            f"a folder above {quoted(shown)} has {glob} in its name; DuckDB would read the full "
             "path as a file pattern, so move the files to a folder without these characters"
         )
     if not path.exists():
-        where = "" if given.is_absolute() else f", relative to the rules file {str(rules_path)!r}"
-        raise DataError(f"data file {shown!r} not found{where}")
+        where = ""
+        if not given.is_absolute():
+            where = f", relative to the rules file {quoted(str(rules_path))}"
+        raise DataError(f"data file {quoted(shown)} not found{where}")
     if path.is_dir():
-        raise DataError(f"{shown!r} is a directory, not a data file")
+        raise DataError(f"{quoted(shown)} is a directory, not a data file")
     if not path.is_file():
-        raise DataError(f"{shown!r} is not a regular file")
+        raise DataError(f"{quoted(shown)} is not a regular file")
     if path.stat().st_size == 0:
-        raise DataError(f"{shown!r} is empty (0 bytes)")
+        raise DataError(f"{quoted(shown)} is empty (0 bytes)")
     return path
 
 
@@ -331,19 +335,19 @@ def scan_csv(path: Path, delimiter: str, shown: str) -> CsvLayout:
                 return _read_records(reader, lines, shown)
             except csv.Error as exc:
                 raise DataError(
-                    f"line {lines.record_start} of {shown!r} is not valid CSV ({exc}); "
+                    f"line {lines.record_start} of {quoted(shown)} is not valid CSV ({exc}); "
                     f"{_QUOTE_HINT}"
                 ) from None
     except UnicodeDecodeError:
         kind = _compression(path)
         if kind is not None:
             raise DataError(
-                f"{shown!r} is a {kind}-compressed file; RowGate reads only uncompressed CSV "
+                f"{quoted(shown)} is a {kind}-compressed file; RowGate reads only uncompressed CSV "
                 "files, so decompress it first"
             ) from None
         raise DataError(_invalid_utf8_message(path, shown)) from None
     except OSError as exc:
-        raise DataError(f"cannot read {shown!r}: {exc.strerror or exc}") from None
+        raise DataError(f"cannot read {quoted(shown)}: {exc.strerror or exc}") from None
 
 
 @contextmanager
@@ -389,7 +393,7 @@ class _PhysicalLines:
         self._record_bytes += len(text) if text.isascii() else len(text.encode("utf-8"))
         if self._record_bytes > self._limit:
             raise DataError(
-                f"line {self.record_start} of {self._shown!r} is longer than "
+                f"line {self.record_start} of {quoted(self._shown)} is longer than "
                 f"{_size(self._limit)}, the most RowGate reads for one CSV record"
             )
         if text.endswith("\r\n"):
@@ -415,9 +419,9 @@ def _size(count: int) -> str:
 def _read_records(reader: Iterator[list[str]], lines: _PhysicalLines, shown: str) -> CsvLayout:
     header = next(reader, None)
     if header is None:
-        raise DataError(f"{shown!r} has no header row")
+        raise DataError(f"{quoted(shown)} has no header row")
     if not header:
-        raise DataError(f"line 1 of {shown!r} is blank; the first line must be the header")
+        raise DataError(f"line 1 of {quoted(shown)} is blank; the first line must be the header")
     first_ending = lines.ending
     lines.next_record()
     header, unnamed = positional_names(header)
@@ -433,7 +437,7 @@ def _read_records(reader: Iterator[list[str]], lines: _PhysicalLines, shown: str
         # (A header without a line break ends the file, so first_ending is set.)
         if ending and ending != first_ending:
             raise DataError(
-                f"line {end} of {shown!r} ends with {_ENDING_NAMES[ending]}, but line 1 "
+                f"line {end} of {quoted(shown)} ends with {_ENDING_NAMES[ending]}, but line 1 "
                 f"ends with {_ENDING_NAMES[first_ending]}; DuckDB cannot read a "
                 "file that mixes line endings, so save it with one kind"
             )
@@ -443,8 +447,8 @@ def _read_records(reader: Iterator[list[str]], lines: _PhysicalLines, shown: str
         if blank_lines:
             if width > 1:
                 raise DataError(
-                    f"line {blank_lines[0]} of {shown!r} is blank; RowGate ignores blank lines "
-                    "only at the end of a file, so remove it"
+                    f"line {blank_lines[0]} of {quoted(shown)} is blank; RowGate ignores blank "
+                    "lines only at the end of a file, so remove it"
                 )
             # In a one-column file a blank line inside the data is an empty (NULL) value.
             rows += len(blank_lines)
@@ -456,7 +460,7 @@ def _read_records(reader: Iterator[list[str]], lines: _PhysicalLines, shown: str
                 else ""
             )
             raise DataError(
-                f"line {start} of {shown!r} has {_fields(len(record))}, but the header has "
+                f"line {start} of {quoted(shown)} has {_fields(len(record))}, but the header has "
                 f"{_fields(width)}{hint}"
             )
         rows += 1
@@ -486,7 +490,7 @@ def check_names(names: list[str], shown: str, unnamed: frozenset[int] = frozense
     for position, name in enumerate(names, start=1):
         if name == "":
             raise DataError(
-                f"column {position} of {shown!r} has an empty name; give every column a name"
+                f"column {position} of {quoted(shown)} has an empty name; give every column a name"
             )
     positions: dict[str, list[int]] = {}
     for position, name in enumerate(names, start=1):
@@ -496,13 +500,13 @@ def check_names(names: list[str], shown: str, unnamed: frozenset[int] = frozense
     clashes = [group for group in positions.values() if len(group) > 1]
     if clashes:
         listed = ", ".join(
-            f"{names[position - 1]!r} (column {position}"
+            f"{quoted(names[position - 1])} (column {position}"
             f"{', unnamed in the header' if position in unnamed else ''})"
             for group in clashes
             for position in group
         )
         raise DataError(
-            f"{shown!r} has duplicate column names (compared ignoring case): {listed}; "
+            f"{quoted(shown)} has duplicate column names (compared ignoring case): {listed}; "
             "give every column a different name"
         )
 
@@ -520,7 +524,7 @@ def _compression(path: Path) -> str | None:
 def _invalid_utf8_message(path: Path, shown: str) -> str:
     line, offset = _find_invalid_utf8(path)
     return (
-        f"{shown!r} is not valid UTF-8 text: invalid byte at line {line} "
+        f"{quoted(shown)} is not valid UTF-8 text: invalid byte at line {line} "
         f"(byte offset {offset}); save the file as UTF-8"
     )
 
@@ -615,10 +619,10 @@ def csv_read_error(exc: duckdb.Error, shown: str) -> DataError:
     """
     match = _DUCKDB_CSV_LINE.search(str(exc))
     if match:
-        message = f"DuckDB could not read line {match[1]} of {shown!r} as CSV"
+        message = f"DuckDB could not read line {match[1]} of {quoted(shown)} as CSV"
     else:
         # Not about a line, e.g. "Not implemented": the CSV may be fine.
-        message = f"RowGate could not read {shown!r}: DuckDB failed without naming a line"
+        message = f"RowGate could not read {quoted(shown)}: DuckDB failed without naming a line"
     return DataError(message, duckdb_message=str(exc))
 
 
@@ -627,7 +631,7 @@ def query_error(exc: duckdb.Error, shown: str, file_format: FileFormat) -> DataE
     if file_format == "csv":
         return csv_read_error(exc, shown)
     return DataError(
-        f"RowGate could not read {shown!r}: DuckDB failed while reading the Parquet data",
+        f"RowGate could not read {quoted(shown)}: DuckDB failed while reading the Parquet data",
         duckdb_message=str(exc),
     )
 
@@ -645,7 +649,7 @@ def _metadata_error(exc: duckdb.Error, shown: str, absolute: str) -> DataError:
         first = first.replace(form, shown)
     more = len(text.splitlines()) > 1
     return DataError(
-        f"cannot read {shown!r} as Parquet",
+        f"cannot read {quoted(shown)} as Parquet",
         duckdb_summary=first,
         duckdb_message=text if more else None,
     )

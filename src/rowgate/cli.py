@@ -15,6 +15,7 @@ from rich.console import Console
 
 from rowgate import __version__, report_text
 from rowgate.checks import DEFAULT_SAMPLES, MAX_SAMPLES, run_checks
+from rowgate.display import escaped, quoted
 from rowgate.errors import RowGateError, UsageError
 from rowgate.loader import load_rules
 
@@ -64,7 +65,9 @@ def parse_max_samples(text: str) -> int:
         if 1 <= number <= MAX_SAMPLES:
             return number
     shown = text if len(text) <= 20 else text[:17] + "..."
-    raise UsageError(f"--max-samples must be a whole number from 1 to {MAX_SAMPLES}, got {shown!r}")
+    raise UsageError(
+        f"--max-samples must be a whole number from 1 to {MAX_SAMPLES}, got {quoted(shown)}"
+    )
 
 
 def _usage_error(message: str) -> NoReturn:
@@ -134,7 +137,10 @@ def validate(rules: RulesArgument, debug: DebugOption = False) -> None:
         count = len(rules_file.checks)
         noun = "check" if count == 1 else "checks"
         source = rules_file.source
-        typer.echo(f"{rules} is valid: {count} {noun} on {source.path} ({source.file_format})")
+        typer.echo(
+            f"{escaped(str(rules))} is valid: {count} {noun} on {escaped(source.path)} "
+            f"({source.file_format})"
+        )
 
 
 @app.command()

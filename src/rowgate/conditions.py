@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import Literal
 
 from rowgate import numbers
+from rowgate.display import quoted
 from rowgate.rules import HUGEINT_MAX, HUGEINT_MIN, InSet, NotNull, Range, Regex
 from rowgate.sql import (
     NUMBER_PATTERN,
@@ -85,28 +86,31 @@ def _in_set_problem(check: InSet, column_type: str, family: Family) -> str | Non
         if check.kind == "number":
             return None
         return (
-            f"column {check.column!r} holds numbers ({column_type}), but the values are "
+            f"column {quoted(check.column)} holds numbers ({column_type}), but the values are "
             f"{words}; write them as numbers, without quotes"
         )
     if family == "boolean":
         if check.kind == "boolean":
             return None
         return (
-            f"column {check.column!r} holds booleans (BOOLEAN), but the values are {words}; "
+            f"column {quoted(check.column)} holds booleans (BOOLEAN), but the values are {words}; "
             "write true or false"
         )
-    return f"in_set does not support {column_type} columns (column {check.column!r})"
+    return f"in_set does not support {column_type} columns (column {quoted(check.column)})"
 
 
 def _range_problem(check: Range, column_type: str, family: Family) -> str | None:
     if family == "timestamp":
-        return f"column {check.column!r} is {column_type}; range on timestamps is not supported yet"
+        return (
+            f"column {quoted(check.column)} is {column_type}; "
+            "range on timestamps is not supported yet"
+        )
     if check.kind == "number":
         if family == "text" or family in NUMERIC:
             return None
         if family == "date":
             return (
-                f"column {check.column!r} holds dates (DATE), but the bounds are numbers; "
+                f"column {quoted(check.column)} holds dates (DATE), but the bounds are numbers; "
                 "write them as dates, like 2024-01-31"
             )
     else:
@@ -114,10 +118,10 @@ def _range_problem(check: Range, column_type: str, family: Family) -> str | None
             return None
         if family in NUMERIC:
             return (
-                f"column {check.column!r} holds numbers ({column_type}), but the bounds are "
+                f"column {quoted(check.column)} holds numbers ({column_type}), but the bounds are "
                 "dates; write them as numbers"
             )
-    return f"range does not support {column_type} columns (column {check.column!r})"
+    return f"range does not support {column_type} columns (column {quoted(check.column)})"
 
 
 _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")

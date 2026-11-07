@@ -33,11 +33,16 @@ N from 1 to 1000; anything else is a usage error, exit 2).
   numbered from 1, the header is not counted, and a record that spans lines
   inside quotes is one row. Samples are in file order. See
   [How rows are numbered](#how-rows-are-numbered).
-- Text values are shown in quotes, with Python's escapes for anything that is
-  not printable, so a line break, a terminal escape code or markup in the
-  data is shown as `\n`, `\x1b` and so on, never sent to the terminal.
-  Values of other types (numbers, dates) are shown in DuckDB's text form,
-  without quotes. A missing value is shown as `NULL`.
+- Text values are shown in quotes, exactly as written, except that
+  characters that cannot be printed are written as escapes: a line break is
+  `\n`, a tab `\t`, a terminal escape code `\x1b`, and invisible characters
+  such as a zero-width space or a right-to-left mark `\u200b` and `\u202e`.
+  So nothing in the data can break, colour or rearrange the output, and rich
+  markup such as `[bold]` is shown as text. Backslashes are shown as written,
+  one for one: `C:\data` is `'C:\data'`. (The other side of that choice: a
+  value holding a backslash and an `n` looks the same as one holding a line
+  break.) Values of other types (numbers, dates) are shown in DuckDB's text
+  form, without quotes. A missing value is shown as `NULL`.
 - A value longer than 80 characters is cut to its first 80, followed by
   `[cut: N characters in all]`.
 - For `unique`, each repeated value is shown once, with the row where it
@@ -225,6 +230,9 @@ form of each value. For a `DOUBLE` column that means `100.0`, `1.5`,
 - Error messages show paths as you wrote them (the rules file as given on
   the command line, the data file as written in the rules), never resolved
   to an absolute path, so CI logs do not reveal your folders or user name.
+  Paths and column names are quoted and escaped the same way as sample
+  values, with backslashes kept: a Windows path is shown as
+  `'C:\Users\me\rules.yaml'`, not with doubled backslashes.
 - The format comes from `source.format`, or else from the extension: `.csv`
   or `.parquet`, in any letter case.
 - Folders named like `key=value` (for example `year=2024`, anywhere in the

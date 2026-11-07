@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Literal
 
 from rowgate.conditions import RowRule, RowTest, Scan, row_test, type_family, type_problem
+from rowgate.display import quoted
 from rowgate.errors import DataError
 from rowgate.rules import (
     Check,
@@ -144,7 +145,7 @@ def checked_column(check: Check) -> str | None:
 def _type_of(dataset: Dataset, name: str) -> str:
     column = dataset.column(name)
     if column is None:  # only possible if _require_runnable was skipped
-        raise AssertionError(f"no column {name!r}")
+        raise AssertionError(f"no column {quoted(name)}")
     return column.type
 
 
@@ -161,8 +162,8 @@ def _require_runnable(rules: RulesFile, dataset: Dataset) -> None:
         if found is None:
             missing = True
             close = difflib.get_close_matches(column, names, n=1)
-            hint = f" (did you mean {close[0]!r}?)" if close else ""
-            problems.append(f"check {index} ({check.rule}): no column {column!r}{hint}")
+            hint = f" (did you mean {quoted(close[0])}?)" if close else ""
+            problems.append(f"check {index} ({check.rule}): no column {quoted(column)}{hint}")
         elif isinstance(check, NotNull | InSet | Range | Regex):
             problem = type_problem(check, found.type)
             if problem is not None:
@@ -171,13 +172,13 @@ def _require_runnable(rules: RulesFile, dataset: Dataset) -> None:
         return
     count = len(problems)
     message = (
-        f"a check cannot run on {dataset.shown!r}"
+        f"a check cannot run on {quoted(dataset.shown)}"
         if count == 1
-        else f"{count} checks cannot run on {dataset.shown!r}"
+        else f"{count} checks cannot run on {quoted(dataset.shown)}"
     )
     details = list(problems)
     if missing:
-        listed = ", ".join(repr(name) for name in names)
+        listed = ", ".join(quoted(name) for name in names)
         details.append(f"the file has {_plural(len(names), 'column')}: {listed}")
         if names and names[0].startswith("#"):
             details.append(
@@ -243,14 +244,14 @@ def _samples(packed: object) -> tuple[Sample, ...]:
 
 def _as_count(value: object, dataset: Dataset) -> int:
     if not isinstance(value, int):
-        raise DataError(f"DuckDB returned no count for {dataset.shown!r}")
+        raise DataError(f"DuckDB returned no count for {quoted(dataset.shown)}")
     return value
 
 
 def _columns_exist(index: int, check: ColumnsExist, dataset: Dataset) -> CheckResult:
     missing = [name for name in check.columns if dataset.column(name) is None]
     if missing:
-        listed = ", ".join(repr(name) for name in missing)
+        listed = ", ".join(quoted(name) for name in missing)
         summary = f"{len(missing)} of {_plural(len(check.columns), 'column')} missing: {listed}"
     else:
         summary = f"all {_plural(len(check.columns), 'column')} present"

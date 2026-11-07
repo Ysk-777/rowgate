@@ -3,16 +3,18 @@
 The text is the same for the same input on every run and machine: no
 timestamps, no terminal-width wrapping, results in rules-file order. Only the
 status words are coloured, and only on a terminal that supports colour.
-Column names and sample values are shown with Python's repr quoting, so a
-line break, a terminal escape code or rich markup in them is printed escaped,
-never interpreted. Sample values are cut to 80 characters.
+Column names and sample values are shown by rowgate.display: quoted, with
+line breaks and terminal escape codes written as escapes, and never
+interpreted as rich markup. Sample values are cut to 80 characters.
 """
 
 from __future__ import annotations
 
 from rich.text import Text
 
+from rowgate import display
 from rowgate.checks import SAMPLE_CHARS, CheckResult, Report, Sample, Status
+from rowgate.display import quoted
 
 STATUS_WORDS: dict[Status, str] = {"passed": "PASS", "failed": "FAIL", "warned": "WARN"}
 STATUS_STYLES: dict[Status, str] = {"passed": "green", "failed": "bold red", "warned": "yellow"}
@@ -21,7 +23,7 @@ SAMPLE_INDENT = " " * 8
 
 def render(report: Report) -> list[Text]:
     """The report as lines of text, each a rich Text with styles only on the status word."""
-    path = report.source_path if report.source_path.isprintable() else repr(report.source_path)
+    path = report.source_path if report.source_path.isprintable() else quoted(report.source_path)
     lines = [
         Text(
             f"Source: {path} ({report.file_format}, {_plural(report.row_count, 'row')}, "
@@ -33,7 +35,7 @@ def render(report: Report) -> list[Text]:
     for result in report.results:
         line = Text()  # Text(word, style=...) would colour the whole line
         line.append(STATUS_WORDS[result.status], style=STATUS_STYLES[result.status])
-        target = "" if result.column is None else f" {result.column!r}"
+        target = "" if result.column is None else f" {quoted(result.column)}"
         line.append(f"  {result.index:>{width}}. {result.rule}{target}: {result.summary}")
         lines.append(line)
         lines.extend(Text(sample) for sample in sample_lines(result))
@@ -78,7 +80,7 @@ def show_value(sample: Sample, quoted: bool) -> str:
     if sample.value is None:
         return "NULL"
     text = sample.value[:SAMPLE_CHARS] if sample.cut else sample.value
-    shown = repr(text) if quoted else repr(text)[1:-1]
+    shown = display.quoted(text) if quoted else display.escaped(text)
     if sample.cut:
         shown += f" [cut: {sample.length} characters in all]"
     return shown

@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 from rowgate import cli
 from rowgate import source as source_module
 from rowgate.cli import app
+from rowgate.display import quoted
 from rowgate.source import CsvLayout
 
 ORDERS = b"order_id,status,amount\n1001,paid,10\n1002,new,\n1003,paid,30\n1003,shipped,40\n"
@@ -109,7 +110,8 @@ def test_a_missing_data_file_exits_with_code_2(tmp_path: Path) -> None:
     code, out, err = run("check", str(rules))
     assert (code, out) == (2, "")
     assert err == (
-        f"error: data file 'orders.csv' not found, relative to the rules file {str(rules)!r}\n"
+        "error: data file 'orders.csv' not found, relative to the rules file "
+        f"{quoted(str(rules))}\n"
     )
 
 
@@ -362,7 +364,9 @@ def test_max_samples_outside_1_to_1000_is_a_usage_error(tmp_path: Path, value: s
     code, out, err = run("check", str(project(tmp_path)), "--max-samples", value)
     assert (code, out) == (2, "")
     shown = value if len(value) <= 20 else value[:17] + "..."
-    assert err == f"error: --max-samples must be a whole number from 1 to 1000, got {shown!r}\n"
+    assert (
+        err == f"error: --max-samples must be a whole number from 1 to 1000, got {quoted(shown)}\n"
+    )
 
 
 def test_a_bad_max_samples_is_reported_even_with_no_samples(tmp_path: Path) -> None:

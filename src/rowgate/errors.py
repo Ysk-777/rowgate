@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from rowgate.display import escaped, quoted
+
 DEBUG_HINT = (
     "run again with --debug to see DuckDB's own message, which can include data values "
     "from the file"
@@ -65,11 +67,11 @@ class RulesError(RowGateError):
         self.problems = problems
         count = len(problems)
         noun = "problem" if count == 1 else "problems"
-        super().__init__(f"invalid rules file {path!r} ({count} {noun})")
+        super().__init__(f"invalid rules file {quoted(path)} ({count} {noun})")
 
     def lines(self, debug: bool = False) -> list[str]:
         if len(self.problems) == 1:
-            return [f"error: {self.path}: {self.problems[0]}"]
+            return [f"error: {escaped(self.path)}: {self.problems[0]}"]
         return [f"error: {self.message}:", *(f"  - {problem}" for problem in self.problems)]
 
 

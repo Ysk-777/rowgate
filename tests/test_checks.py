@@ -17,6 +17,7 @@ from rowgate.checks import (
     run_checks,
 )
 from rowgate.conditions import Scan, row_test, type_family
+from rowgate.display import quoted
 from rowgate.errors import DataError
 from rowgate.loader import load_rules, parse_rules_yaml
 from rowgate.rules import InSet, NotNull, Range, Regex
@@ -404,7 +405,7 @@ def test_a_key_value_folder_is_not_a_column_to_check(
     with pytest.raises(DataError) as excinfo:
         run(folder, "  - {rule: not_null, column: year}\n", name=name)
     assert excinfo.value.lines() == [
-        f"error: a check cannot run on {name!r}",
+        f"error: a check cannot run on {quoted(name)}",
         "  check 1 (not_null): no column 'year'",
         "  the file has 3 columns: 'id', 'b', 'c'",
     ]
