@@ -8,14 +8,14 @@ import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 from rich.console import Console
 
 from rowgate import __version__, report_text
 from rowgate.checks import DEFAULT_SAMPLES, MAX_SAMPLES, run_checks
-from rowgate.errors import RowGateError
+from rowgate.errors import RowGateError, UsageError
 from rowgate.loader import load_rules
 
 EXIT_OK = 0
@@ -45,16 +45,31 @@ NoSamplesOption = Annotated[
         help="Show no data values at all: no samples, and none in error messages.",
     ),
 ]
+# Read as text and checked by RowGate, so a bad value gets RowGate's own
+# "error:" line instead of the usage panel the command-line library prints.
 MaxSamplesOption = Annotated[
-    int,
+    str,
     typer.Option(
         "--max-samples",
-        min=1,
-        max=MAX_SAMPLES,
         metavar="N",
         help=f"Show up to N failing rows per check (1 to {MAX_SAMPLES}).",
     ),
 ]
+
+
+def parse_max_samples(text: str) -> int:
+    """The value of --max-samples: a whole number from 1 to MAX_SAMPLES."""
+    if text.isascii() and text.isdigit() and len(text) <= len(str(MAX_SAMPLES)):
+        number = int(text)
+        if 1 <= number <= MAX_SAMPLES:
+            return number
+    shown = text if len(text) <= 20 else text[:17] + "..."
+    raise UsageError(f"--max-samples must be a whole number from 1 to {MAX_SAMPLES}, got {shown!r}")
+
+
+def _usage_error(message: str) -> NoReturn:
+    typer.echo(f"error: {message}", err=True)
+    raise typer.Exit(EXIT_ERROR)
 
 
 def _show_version(value: bool) -> None:
@@ -126,7 +141,7 @@ def validate(rules: RulesArgument, debug: DebugOption = False) -> None:
 def check(
     rules: RulesArgument,
     no_samples: NoSamplesOption = False,
-    max_samples: MaxSamplesOption = DEFAULT_SAMPLES,
+    max_samples: MaxSamplesOption = str(DEFAULT_SAMPLES),
     debug: DebugOption = False,
 ) -> None:
     """Check the data file against the rules and report what fails.
@@ -134,16 +149,16 @@ def check(
     Exit code 0 if no check with severity error fails, 1 if one does, and 2
     if the rules file or the data file cannot be used.
     """
+    try:
+        sample_count = parse_max_samples(max_samples)
+    except UsageError as exc:
+        _usage_error(exc.message)
     if no_samples and debug:
         # --debug can print DuckDB's own messages, which can quote data rows.
-        typer.echo(
-            "error: --debug can print data values, so it cannot be used with --no-samples",
-            err=True,
-        )
-        raise typer.Exit(EXIT_ERROR)
+        _usage_error("--debug can print data values, so it cannot be used with --no-samples")
     exit_code = EXIT_ERROR
     with report_errors(debug, hide_data=no_samples):
-        samples = None if no_samples else max_samples
+        samples = None if no_samples else sample_count
         report = run_checks(load_rules(rules), rules, max_samples=samples)
         console = Console(highlight=False, soft_wrap=True, emoji=False)
         for line in report_text.render(report):

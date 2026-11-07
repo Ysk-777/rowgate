@@ -355,11 +355,34 @@ def test_max_samples(tmp_path: Path, value: str, shown: int) -> None:
     assert sum(1 for line in out.splitlines() if line.startswith("        row ")) == shown
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "1001", "abc", "2.5"])
+@pytest.mark.parametrize(
+    "value", ["0", "-1", "1001", "abc", "2.5", "", " 5", "+5", "\uff15", "1" * 5000]
+)
 def test_max_samples_outside_1_to_1000_is_a_usage_error(tmp_path: Path, value: str) -> None:
     code, out, err = run("check", str(project(tmp_path)), "--max-samples", value)
     assert (code, out) == (2, "")
-    assert err
+    shown = value if len(value) <= 20 else value[:17] + "..."
+    assert err == f"error: --max-samples must be a whole number from 1 to 1000, got {shown!r}\n"
+
+
+def test_a_bad_max_samples_is_reported_even_with_no_samples(tmp_path: Path) -> None:
+    code, out, err = run("check", str(project(tmp_path)), "--no-samples", "--max-samples", "0")
+    assert (code, out) == (2, "")
+    assert err.startswith("error: --max-samples must be")
+
+
+def test_max_samples_errors_are_one_line_without_a_usage_panel(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "rowgate", "check", str(project(tmp_path)), "--max-samples", "0"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "FORCE_COLOR": "1", "COLUMNS": "60"},
+    )
+    assert (completed.returncode, completed.stdout) == (2, "")
+    assert completed.stderr == (
+        "error: --max-samples must be a whole number from 1 to 1000, got '0'\n"
+    )
 
 
 def test_no_samples_shows_none(tmp_path: Path) -> None:

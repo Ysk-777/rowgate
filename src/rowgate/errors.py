@@ -89,3 +89,7 @@ class DataError(RowGateError):
 
     def lines(self, debug: bool = False) -> list[str]:
         return [f"error: {self._text(debug)}", *(f"  {detail}" for detail in self.details)]
+
+
+class UsageError(RowGateError):
+    """A command-line option has a value RowGate cannot use."""
