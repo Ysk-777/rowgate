@@ -6,6 +6,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
+import yaml
 
 from rowgate.checks import (
     CheckResult,
@@ -17,9 +18,10 @@ from rowgate.checks import (
     _type_of,
     run_checks,
 )
-from rowgate.conditions import type_family
+from rowgate.conditions import row_test, type_family
 from rowgate.errors import DataError
 from rowgate.loader import load_rules
+from rowgate.rules import InSet
 from rowgate.source import open_dataset
 
 ORDERS = b"""\
@@ -902,3 +904,25 @@ def test_text_past_the_largest_double_fails_a_min_only_range(tmp_path: Path) -> 
     result = only(run(tmp_path, range_check("min: 0"), data))
     assert result.failing_rows == 2
     assert [sample.row for sample in result.samples or ()] == [1, 2]
+
+
+def test_a_large_set_is_matched_with_a_hash_join(tmp_path: Path) -> None:
+    # list_contains compares every row with every member: with 1,000 values on
+    # 3 million rows it took 12.4 s against 0.4 s for the IN-subquery form.
+    members = ", ".join(f"v{number}" for number in range(1000))
+    data = b"v\n" + b"".join(b"v%d\n" % number for number in range(0, 2000, 3))
+    result = only(run(tmp_path, in_set(f"[{members}]"), data, max_samples=1))
+    assert result.failing_rows == sum(1 for number in range(0, 2000, 3) if number >= 1000)
+    assert failing_values(result) == ["v1002"]
+    for column_type in ("VARCHAR", "BIGINT", "DOUBLE", "BOOLEAN"):
+        kind = {"VARCHAR": "[a]", "BIGINT": "[1, 2.5]", "DOUBLE": "[1]", "BOOLEAN": "[true]"}
+        check = InSet.model_validate(
+            {"rule": "in_set", "column": "v", "values": load_values(kind[column_type])}
+        )
+        assert "list_contains" not in row_test(1, check, column_type).fails
+
+
+def load_values(flow: str) -> list[object]:
+    values = yaml.safe_load(flow)
+    assert isinstance(values, list)
+    return values
