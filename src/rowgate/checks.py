@@ -40,7 +40,6 @@ Status = Literal["passed", "failed", "warned"]
 DEFAULT_SAMPLES = 5
 MAX_SAMPLES = 1000
 SAMPLE_CHARS = 80  # longer values are cut to this many characters
-_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 
 @dataclass(frozen=True)
@@ -188,15 +187,6 @@ def _require_runnable(rules: RulesFile, dataset: Dataset) -> None:
     raise DataError(message, details)
 
 
-def _row_alias(names: list[str]) -> str:
-    """A name for the row-number column that no data column has (ignoring ASCII case)."""
-    taken = {name.translate(_ASCII_LOWER) for name in names}
-    alias = "rowgate_row"
-    while alias in taken:
-        alias += "_"
-    return alias
-
-
 def _sample_struct(row: str, shown: str, extra: str = "") -> str:
     return (
         f"struct_pack(r := {row}, v := left({shown}, {SAMPLE_CHARS + 1}), "
@@ -226,12 +216,10 @@ def _scan_row_checks(
         params.update(test.params)
     if max_samples is not None:
         params["rowgate_samples"] = max_samples
-        inner = (
-            f"SELECT row_number() OVER () AS {row}, {', '.join(columns)} FROM {dataset.relation}"  # noqa: S608
-        )
+        inner = dataset.numbered(row, columns)
     else:
-        inner = f"SELECT {', '.join(columns)} FROM {dataset.relation}"  # noqa: S608
-    sql = f"SELECT {', '.join(selects)} FROM ({inner}) AS rowgate_data"  # noqa: S608
+        inner = f"(SELECT {', '.join(columns)} FROM {dataset.relation})"  # noqa: S608
+    sql = f"SELECT {', '.join(selects)} FROM {inner} AS rowgate_data"  # noqa: S608
     values = dataset.row(sql, params)
     step = 1 if max_samples is None else 2
     found: dict[int, tuple[int, tuple[Sample, ...] | None]] = {}
@@ -348,14 +336,14 @@ def _unique(index: int, check: Unique, dataset: Dataset, max_samples: int | None
         groups, failing = dataset.row(sql, {})
         samples = None
     else:
-        row = _row_alias(dataset.column_names)
+        row = Scan(dataset.column_names).new_name("rowgate_row")
         shown = "value" if text else "CAST(value AS VARCHAR)"
         sample = _sample_struct("first_row", shown, ", c := copies")
         sql = (
             f"SELECT count(*), coalesce(sum(copies), 0), "  # noqa: S608
             f"min_by({sample}, first_row, $rowgate_samples) FROM ("
             f"SELECT {column} AS value, count(*) AS copies, min({row}) AS first_row "
-            f"FROM (SELECT row_number() OVER () AS {row}, {column} FROM {dataset.relation}) "
+            f"FROM {dataset.numbered(row, [column])} "
             f"AS rowgate_data WHERE {column} IS NOT NULL GROUP BY {column} HAVING count(*) > 1)"
         )
         groups, failing, packed = dataset.row(sql, {"rowgate_samples": max_samples})

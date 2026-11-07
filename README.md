@@ -31,8 +31,8 @@ N from 1 to 1000; anything else is a usage error, exit 2).
 
 - A sample shows the data row number and the value: `row 4: 'abc'`. Rows are
   numbered from 1, the header is not counted, and a record that spans lines
-  inside quotes is one row. Samples are in file order: CSV files are read in
-  one thread, and Parquet rows keep their stored order.
+  inside quotes is one row. Samples are in file order. See
+  [How rows are numbered](#how-rows-are-numbered).
 - Text values are shown in quotes, with Python's escapes for anything that is
   not printable, so a line break, a terminal escape code or markup in the
   data is shown as `\n`, `\x1b` and so on, never sent to the terminal.
@@ -53,6 +53,27 @@ are given, `--no-samples` wins over `--max-samples`. Column names, the file
 path and the values in your rules file are still shown: they are not data.
 This is tested by putting a marker string in the data of every rule and of
 every kind of unreadable file, and checking it never reaches stdout or stderr.
+
+### How rows are numbered
+
+- **Parquet** rows are numbered by DuckDB's `file_row_number`: each row's
+  position in the file. It does not depend on the order in which DuckDB's
+  threads happen to read the row groups.
+- **CSV** files have no such number, so RowGate numbers rows with
+  `row_number() OVER ()` as DuckDB reads them. That order is the file's
+  order because RowGate reads CSV files with `parallel := false`: DuckDB
+  runs a query in as many threads as its data source allows, so with a
+  one-thread reader the rows reach the numbering one chunk at a time, in the
+  order the reader reads them from the file. (DuckDB's parallel reader would
+  split the file into ranges read side by side; see
+  [CSV files](#csv-files) for why RowGate does not use it.)
+- A Parquet file with its own column named `file_row_number` (in any letter
+  case) hides DuckDB's row numbers behind that column, so it cannot show
+  samples: such a run stops with exit 2 and says so, and works with
+  `--no-samples`. In a CSV file that name is an ordinary column.
+
+Both are tested against known answers: a 30,000-record CSV file with line
+breaks inside quotes, and a 200,000-row Parquet file in 98 row groups.
 
 ## Writing values in the rules file
 
@@ -319,7 +340,8 @@ Every option RowGate passes to DuckDB's `read_csv`, and why:
 | `compression := 'none'` | the file name never makes DuckDB decompress |
 | `max_line_size := 33554432` | only for a file with a record over 1 MiB; DuckDB's 2 MiB default otherwise, because a larger value slows every scan |
 
-For `read_parquet` the only option is `hive_partitioning := false`.
+For `read_parquet` the only options are `hive_partitioning := false` and,
+in the scans that collect samples, `file_row_number := true`.
 
 ### Column names
 

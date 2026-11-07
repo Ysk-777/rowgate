@@ -16,7 +16,8 @@ from rowgate import source as source_module
 from rowgate.checks import run_checks
 from rowgate.cli import app
 from rowgate.loader import load_rules
-from rowgate.source import CsvLayout
+from rowgate.rules import Source
+from rowgate.source import CsvLayout, open_dataset
 
 MARKER = "MRK-7f3a"  # appears only in data values, never in rules or column names
 
@@ -253,3 +254,68 @@ def test_parquet_samples_follow_row_order_across_row_groups(tmp_path: Path) -> N
     assert firsts[:3] == [(1, "1", 200), (2, "2", 200), (3, "3", 200)]
     assert firsts[-1] == (1000, "0", 200)
     assert [row for row, _, _ in firsts] == sorted(row for row, _, _ in firsts)
+
+
+def test_parquet_rows_are_numbered_by_their_position_in_the_file(tmp_path: Path) -> None:
+    target = tmp_path / "data.parquet"
+    duckdb.connect(":memory:").execute(
+        "COPY (SELECT i AS id FROM range(1, 50001) t(i)) "  # noqa: S608 - test data
+        f"TO '{target}' (FORMAT parquet, ROW_GROUP_SIZE 2048)"
+    )
+    with open_dataset(tmp_path / "rules.yaml", Source(path="data.parquet")) as dataset:
+        numbered = dataset.numbered("r", ['"id"'])
+        assert "file_row_number" in numbered
+        assert "row_number() OVER ()" not in numbered
+        found = dataset.row(
+            f"SELECT min(r), max(r), count(*) FILTER (WHERE r <> id) FROM {numbered}"  # noqa: S608
+        )
+    assert found == (1, 50_000, 0)
+
+
+def test_csv_rows_are_numbered_in_reading_order(tmp_path: Path) -> None:
+    (tmp_path / "data.csv").write_text("id\n" + "".join(f"{i}\n" for i in range(1, 1001)))
+    with open_dataset(tmp_path / "rules.yaml", Source(path="data.csv")) as dataset:
+        numbered = dataset.numbered("r", ['"id"'])
+        assert "row_number() OVER ()" in numbered
+        found = dataset.row(
+            f"SELECT count(*) FILTER (WHERE r <> CAST(id AS BIGINT)) FROM {numbered}"  # noqa: S608
+        )
+    assert found == (0,)
+
+
+@pytest.mark.parametrize("name", ["file_row_number", "FILE_ROW_NUMBER"])
+def test_a_parquet_column_named_file_row_number_cannot_have_samples(
+    tmp_path: Path, name: str
+) -> None:
+    # DuckDB's row numbers would be hidden behind the file's own column.
+    target = tmp_path / "data.parquet"
+    duckdb.connect(":memory:").execute(
+        f"COPY (SELECT 7 AS {name}, NULL::INTEGER AS v) TO '{target}' (FORMAT parquet)"
+    )
+    rules = write(
+        tmp_path,
+        "version: 1\nsource: {path: data.parquet}\n"
+        "checks: [{rule: not_null, column: v}, {rule: unique, column: v}]\n",
+        b"",
+        name="unused.csv",
+    )
+    code, output = cli_output("check", str(rules))
+    assert code == 2
+    assert output == (
+        f"error: cannot show samples for 'data.parquet': it has a column named {name!r}, the "
+        "name DuckDB gives the row numbers that samples show; run with --no-samples, or rename "
+        "the column\n"
+    )
+    code, output = cli_output("check", str(rules), "--no-samples")
+    assert code == 1
+    assert "1 of 1 row is NULL" in output
+
+
+def test_a_csv_column_named_file_row_number_is_an_ordinary_column(tmp_path: Path) -> None:
+    rules = write(
+        tmp_path,
+        "version: 1\nsource: {path: data.csv}\nchecks: [{rule: not_null, column: v}]\n",
+        b"file_row_number,v\n10,\n20,x\n",
+    )
+    [result] = run_checks(load_rules(rules), rules).results
+    assert [sample.row for sample in result.samples or ()] == [1]

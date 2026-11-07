@@ -76,6 +76,11 @@ CSV_RELATION_LONG_RECORDS = (
 )
 # hive_partitioning off: a folder named like key=value (year=2024) is not a column.
 PARQUET_RELATION = "read_parquet($rowgate_path, hive_partitioning := false)"
+# The same file with file_row_number, each row's 0-based position in the file.
+PARQUET_NUMBERED_RELATION = (
+    "read_parquet($rowgate_path, hive_partitioning := false, file_row_number := true)"
+)
+PARQUET_ROW_NUMBER = "file_row_number"
 
 DEFAULT_DELIMITER = ","
 _CHUNK_SIZE = 1 << 20
@@ -150,6 +155,37 @@ class Dataset:
             if column.name == name:
                 return column
         return None
+
+    def numbered(self, row: str, select: list[str]) -> str:
+        """A subquery of ``select`` plus each row's 1-based number in the file, named ``row``.
+
+        Parquet rows are numbered by DuckDB's file_row_number: the row's
+        position in the file, whatever order the rows are read in.
+
+        CSV files have no such number, so rows are numbered with
+        row_number() OVER (), in the order they reach it. That is file order:
+        DuckDB runs a query in as many threads as its data source allows, and
+        the CSV reader runs with parallel := false, which is one thread, so
+        the rows pass through row_number() one chunk at a time, in the order
+        the reader reads them.
+        """
+        columns = ", ".join(select)
+        if self.file_format == "parquet":
+            self._require_parquet_row_numbers()
+            return (
+                f"(SELECT {PARQUET_ROW_NUMBER} + 1 AS {row}, {columns} "  # noqa: S608
+                f"FROM {PARQUET_NUMBERED_RELATION})"
+            )
+        return f"(SELECT row_number() OVER () AS {row}, {columns} FROM {self.relation})"  # noqa: S608
+
+    def _require_parquet_row_numbers(self) -> None:
+        for name in self.column_names:
+            if name.translate(_ASCII_LOWER) == PARQUET_ROW_NUMBER:
+                raise DataError(
+                    f"cannot show samples for {self.shown!r}: it has a column named {name!r}, "
+                    "the name DuckDB gives the row numbers that samples show; run with "
+                    "--no-samples, or rename the column"
+                )
 
     def scalar(self, sql: str, params: dict[str, object] | None = None) -> object:
         """Run a query that reads ``self.relation`` and return its single value."""

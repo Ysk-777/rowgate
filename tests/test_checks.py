@@ -12,7 +12,6 @@ from rowgate.checks import (
     Report,
     Sample,
     _as_count,
-    _row_alias,
     _samples,
     _type_of,
     run_checks,
@@ -486,7 +485,7 @@ def test_a_data_column_named_like_the_row_number_is_fine(tmp_path: Path) -> None
         (1, [1]),
         (2, [1]),
     ]
-    assert _row_alias(["rowgate_row", "ROWGATE_ROW_"]) == "rowgate_row__"
+    assert Scan(["rowgate_row", "ROWGATE_ROW_"]).new_name("rowgate_row") == '"rowgate_row__"'
 
 
 def test_parquet_samples_use_duckdb_text_form(tmp_path: Path) -> None:
