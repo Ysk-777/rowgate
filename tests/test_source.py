@@ -1086,13 +1086,38 @@ def quoted_line_break_across_a_chunk() -> tuple[bytes, int]:
     return b"".join(parts), number + 49  # records 1 .. number - 1, the filler, 49 more
 
 
-def test_a_file_the_parallel_reader_gives_up_on_is_read(tmp_path: Path) -> None:
+@pytest.fixture
+def chunk_boundary_in_quotes(tmp_path: Path) -> tuple[Path, int]:
     content, expected_rows = quoted_line_break_across_a_chunk()
     path = tmp_path / "data.csv"
     path.write_bytes(content)
     assert len(content) > CHUNK
+    return path, expected_rows
 
-    # The file really does defeat DuckDB's parallel reader, at any thread count.
+
+def test_a_file_the_parallel_reader_gives_up_on_is_read(
+    tmp_path: Path, chunk_boundary_in_quotes: tuple[Path, int]
+) -> None:
+    _, expected_rows = chunk_boundary_in_quotes
+    with open_dataset(tmp_path / "rules.yaml", source("data.csv")) as dataset:
+        assert dataset.row_count == expected_rows
+        last = dataset.scalar(f"SELECT max(id::INTEGER) FROM {dataset.relation}")  # noqa: S608
+        assert last == expected_rows
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "Checks that DuckDB's parallel CSV reader still gives up on this valid file. If a "
+        "DuckDB update fixes that, this test starts failing (reported as xfail): reconsider "
+        "RowGate's parallel := false, which costs about 30% on large files."
+    ),
+)
+@pytest.mark.parametrize("threads", [1, 4])
+def test_duckdb_parallel_reader_still_gives_up_on_this_file(
+    chunk_boundary_in_quotes: tuple[Path, int], threads: int
+) -> None:
+    path, _ = chunk_boundary_in_quotes
     options = re.sub(r", parallel := \w+", "", source_module.CSV_RELATION)
     parallel = options[:-1] + ", parallel := true)"
     params: dict[str, object] = {
@@ -1100,16 +1125,10 @@ def test_a_file_the_parallel_reader_gives_up_on_is_read(tmp_path: Path) -> None:
         "rowgate_columns": {"id": "VARCHAR", "text": "VARCHAR"},
         "rowgate_delimiter": ",",
     }
-    for threads in (1, 4):
-        connection = duckdb.connect(":memory:")
-        connection.execute(f"SET threads = {threads}")
-        with pytest.raises(duckdb.Error):
-            connection.execute(f"SELECT count(*) FROM {parallel}", params).fetchone()  # noqa: S608
-
-    with open_dataset(tmp_path / "rules.yaml", source("data.csv")) as dataset:
-        assert dataset.row_count == expected_rows
-        last = dataset.scalar(f"SELECT max(id::INTEGER) FROM {dataset.relation}")  # noqa: S608
-        assert last == expected_rows
+    connection = duckdb.connect(":memory:")
+    connection.execute(f"SET threads = {threads}")
+    with pytest.raises(duckdb.Error):
+        connection.execute(f"SELECT count(*) FROM {parallel}", params).fetchone()  # noqa: S608
 
 
 # --- compressed files and file names that look compressed --------------------------------------
