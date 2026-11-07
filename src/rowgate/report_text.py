@@ -3,18 +3,20 @@
 The text is the same for the same input on every run and machine: no
 timestamps, no terminal-width wrapping, results in rules-file order. Only the
 status words are coloured, and only on a terminal that supports colour.
-Column names are shown with Python's repr quoting, so a name holding a line
-break or a terminal escape code is printed escaped, never interpreted.
+Column names and sample values are shown with Python's repr quoting, so a
+line break, a terminal escape code or rich markup in them is printed escaped,
+never interpreted. Sample values are cut to 80 characters.
 """
 
 from __future__ import annotations
 
 from rich.text import Text
 
-from rowgate.checks import Report, Status
+from rowgate.checks import SAMPLE_CHARS, CheckResult, Report, Sample, Status
 
 STATUS_WORDS: dict[Status, str] = {"passed": "PASS", "failed": "FAIL", "warned": "WARN"}
 STATUS_STYLES: dict[Status, str] = {"passed": "green", "failed": "bold red", "warned": "yellow"}
+SAMPLE_INDENT = " " * 8
 
 
 def render(report: Report) -> list[Text]:
@@ -34,6 +36,7 @@ def render(report: Report) -> list[Text]:
         target = "" if result.column is None else f" {result.column!r}"
         line.append(f"  {result.index:>{width}}. {result.rule}{target}: {result.summary}")
         lines.append(line)
+        lines.extend(Text(sample) for sample in sample_lines(result))
     lines.append(Text(""))
     lines.append(
         Text(
@@ -46,3 +49,36 @@ def render(report: Report) -> list[Text]:
 
 def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def sample_lines(result: CheckResult) -> list[str]:
+    """The sample rows shown under a failing check, in file order."""
+    if not result.samples:
+        return []
+    lines = []
+    for sample in result.samples:
+        value = show_value(sample, quoted=result.text_values)
+        if sample.count is not None:
+            lines.append(f"{SAMPLE_INDENT}row {sample.row}: {value}, appears {sample.count} times")
+        else:
+            lines.append(f"{SAMPLE_INDENT}row {sample.row}: {value}")
+    if result.more:
+        noun = "repeated value" if result.rule == "unique" else "row"
+        nouns = noun if result.more == 1 else f"{noun}s"
+        lines.append(f"{SAMPLE_INDENT}... and {result.more} more {nouns}")
+    return lines
+
+
+def show_value(sample: Sample, quoted: bool) -> str:
+    """A sample value, escaped and cut to SAMPLE_CHARS characters.
+
+    Text values are shown in quotes; other values (numbers, dates) in
+    DuckDB's text form without quotes, escaped the same way.
+    """
+    if sample.value is None:
+        return "NULL"
+    text = sample.value[:SAMPLE_CHARS] if sample.cut else sample.value
+    shown = repr(text) if quoted else repr(text)[1:-1]
+    if sample.cut:
+        shown += f" [cut: {sample.length} characters in all]"
+    return shown

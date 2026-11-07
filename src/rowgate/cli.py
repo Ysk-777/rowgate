@@ -14,7 +14,7 @@ import typer
 from rich.console import Console
 
 from rowgate import __version__, report_text
-from rowgate.checks import run_checks
+from rowgate.checks import DEFAULT_SAMPLES, MAX_SAMPLES, run_checks
 from rowgate.errors import RowGateError
 from rowgate.loader import load_rules
 
@@ -37,6 +37,23 @@ RulesArgument = Annotated[
 DebugOption = Annotated[
     bool,
     typer.Option("--debug", help="Show the full traceback if something goes wrong."),
+]
+NoSamplesOption = Annotated[
+    bool,
+    typer.Option(
+        "--no-samples",
+        help="Show no data values at all: no samples, and none in error messages.",
+    ),
+]
+MaxSamplesOption = Annotated[
+    int,
+    typer.Option(
+        "--max-samples",
+        min=1,
+        max=MAX_SAMPLES,
+        metavar="N",
+        help=f"Show up to N failing rows per check (1 to {MAX_SAMPLES}).",
+    ),
 ]
 
 
@@ -62,12 +79,15 @@ def _main(
 
 
 @contextmanager
-def report_errors(debug: bool) -> Iterator[None]:
+def report_errors(debug: bool, hide_data: bool = False) -> Iterator[None]:
     """Turn any error into a short message on stderr and exit code 2.
 
     A traceback is printed only with ``--debug``. The exit is raised after the
     except block, so the original exception (and the open DuckDB connection its
     traceback refers to) is released instead of travelling on as context.
+
+    With ``hide_data`` (--no-samples), an unexpected error is reported by its
+    type only, because its text could hold a data value.
     """
     try:
         yield
@@ -84,7 +104,8 @@ def report_errors(debug: bool) -> Iterator[None]:
         if debug:
             traceback.print_exc()
         hint = "" if debug else " (run again with --debug to see the traceback)"
-        lines = [f"error: internal error: {type(exc).__name__}: {exc}{hint}"]
+        detail = "" if hide_data else f": {exc}"
+        lines = [f"error: internal error: {type(exc).__name__}{detail}{hint}"]
     for line in lines:
         typer.echo(line, err=True)
     raise typer.Exit(EXIT_ERROR)
@@ -102,15 +123,28 @@ def validate(rules: RulesArgument, debug: DebugOption = False) -> None:
 
 
 @app.command()
-def check(rules: RulesArgument, debug: DebugOption = False) -> None:
+def check(
+    rules: RulesArgument,
+    no_samples: NoSamplesOption = False,
+    max_samples: MaxSamplesOption = DEFAULT_SAMPLES,
+    debug: DebugOption = False,
+) -> None:
     """Check the data file against the rules and report what fails.
 
     Exit code 0 if no check with severity error fails, 1 if one does, and 2
     if the rules file or the data file cannot be used.
     """
+    if no_samples and debug:
+        # --debug can print DuckDB's own messages, which can quote data rows.
+        typer.echo(
+            "error: --debug can print data values, so it cannot be used with --no-samples",
+            err=True,
+        )
+        raise typer.Exit(EXIT_ERROR)
     exit_code = EXIT_ERROR
-    with report_errors(debug):
-        report = run_checks(load_rules(rules), rules)
+    with report_errors(debug, hide_data=no_samples):
+        samples = None if no_samples else max_samples
+        report = run_checks(load_rules(rules), rules, max_samples=samples)
         console = Console(highlight=False, soft_wrap=True, emoji=False)
         for line in report_text.render(report):
             console.print(line)

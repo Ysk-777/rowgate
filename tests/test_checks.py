@@ -7,7 +7,17 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from rowgate.checks import CheckResult, Report, _count, _run, run_checks
+from rowgate.checks import (
+    CheckResult,
+    Report,
+    Sample,
+    _as_count,
+    _row_alias,
+    _samples,
+    _type_of,
+    run_checks,
+)
+from rowgate.conditions import row_test, type_family
 from rowgate.errors import DataError, RowGateError
 from rowgate.loader import load_rules
 from rowgate.rules import InSet
@@ -24,13 +34,19 @@ order_id,status,amount,note
 """
 
 
-def run(tmp_path: Path, checks: str, data: bytes = ORDERS, name: str = "data.csv") -> Report:
+def run(
+    tmp_path: Path,
+    checks: str,
+    data: bytes = ORDERS,
+    name: str = "data.csv",
+    max_samples: int | None = 5,
+) -> Report:
     data_path = tmp_path / name
     if not data_path.exists():
         data_path.write_bytes(data)
     rules = tmp_path / "rules.yaml"
     rules.write_text(f"version: 1\nsource: {{path: {name}}}\nchecks:\n{checks}", encoding="utf-8")
-    return run_checks(load_rules(rules), rules)
+    return run_checks(load_rules(rules), rules, max_samples=max_samples)
 
 
 def only(report: Report) -> CheckResult:
@@ -197,7 +213,7 @@ def test_a_missing_column_is_an_error_listing_the_columns(tmp_path: Path) -> Non
     with pytest.raises(DataError) as excinfo:
         run(tmp_path, "  - {rule: row_count, min: 1}\n  - {rule: not_null, column: orderid}\n")
     assert excinfo.value.lines() == [
-        "error: a check refers to a column that 'data.csv' does not have",
+        "error: a check cannot run on 'data.csv'",
         "  check 2 (not_null): no column 'orderid' (did you mean 'order_id'?)",
         "  the file has 4 columns: 'order_id', 'status', 'amount', 'note'",
     ]
@@ -212,7 +228,7 @@ def test_every_missing_column_is_reported(tmp_path: Path) -> None:
     with pytest.raises(DataError) as excinfo:
         run(tmp_path, checks)
     assert excinfo.value.lines() == [
-        "error: 2 checks refer to columns that 'data.csv' does not have",
+        "error: 2 checks cannot run on 'data.csv'",
         "  check 1 (unique): no column 'Status' (did you mean 'status'?)",
         "  check 3 (not_null): no column 'zzz'",
         "  the file has 4 columns: 'order_id', 'status', 'amount', 'note'",
@@ -298,24 +314,30 @@ def test_checks_on_parquet(tmp_path: Path) -> None:
 # --- guards ----------------------------------------------------------------------------------
 
 
-def test_a_check_without_a_runner_is_an_internal_error(tmp_path: Path) -> None:
-    (tmp_path / "data.csv").write_bytes(b"id\n1\n")
-    rules = load_rules(_write_rules(tmp_path))
+def test_a_rule_without_a_condition_yet_is_an_internal_error() -> None:
     check = InSet(rule="in_set", column="id", values=["1"])
-    with (
-        open_dataset(tmp_path / "rules.yaml", rules.source) as dataset,
-        pytest.raises(AssertionError),
-    ):
-        _run(1, check, dataset)
+    with pytest.raises(AssertionError):
+        row_test(1, check, "VARCHAR")
 
 
-def test_a_missing_count_is_a_data_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_missing_count_is_a_data_error(tmp_path: Path) -> None:
     (tmp_path / "data.csv").write_bytes(b"id\n1\n")
     rules = load_rules(_write_rules(tmp_path))
     with open_dataset(tmp_path / "rules.yaml", rules.source) as dataset:
-        monkeypatch.setattr(dataset, "scalar", lambda sql: None)
         with pytest.raises(DataError):
-            _count(dataset, "SELECT 1")
+            _as_count(None, dataset)
+        with pytest.raises(AssertionError):
+            _type_of(dataset, "no such column")
+        # The queries must read the relation, or DuckDB rejects the unused parameters.
+        with pytest.raises(DataError, match="returned no result"):
+            dataset.row(f"SELECT 1 FROM {dataset.relation} WHERE false")  # noqa: S608
+        with pytest.raises(DataError, match="RowGate could not read"):
+            dataset.row(f"SELECT no_such_column FROM {dataset.relation}")  # noqa: S608
+
+
+def test_unexpected_samples_are_an_internal_error() -> None:
+    with pytest.raises(AssertionError):
+        _samples("not a list")
 
 
 def _write_rules(tmp_path: Path) -> Path:
@@ -399,7 +421,118 @@ def test_a_key_value_folder_is_not_a_column_to_check(
     with pytest.raises(DataError) as excinfo:
         run(folder, "  - {rule: not_null, column: year}\n", name=name)
     assert excinfo.value.lines() == [
-        f"error: a check refers to a column that {name!r} does not have",
+        f"error: a check cannot run on {name!r}",
         "  check 1 (not_null): no column 'year'",
         "  the file has 3 columns: 'id', 'b', 'c'",
     ]
+
+
+# --- samples ---------------------------------------------------------------------------------
+
+
+def test_not_null_samples_are_row_numbers_in_file_order(tmp_path: Path) -> None:
+    result = only(run(tmp_path, "  - {rule: not_null, column: note}\n"))
+    assert result.samples == (
+        Sample(row=1, value=None, length=None),
+        Sample(row=3, value=None, length=None),
+    )
+    assert result.more == 0
+
+
+def test_unique_samples_show_each_repeated_value_once_with_its_count(tmp_path: Path) -> None:
+    result = only(run(tmp_path, "  - {rule: unique, column: status}\n"))
+    # paid first appears on row 1, new on row 2: ordered by first appearance.
+    assert result.samples == (
+        Sample(row=1, value="paid", length=4, count=2),
+        Sample(row=2, value="new", length=3, count=2),
+    )
+
+
+def test_samples_are_limited_and_the_rest_counted(tmp_path: Path) -> None:
+    data = b"v\n" + b"\n".join(b"" if i % 2 else b"x" for i in range(1, 22)) + b"\nend\n"
+    report = run(tmp_path, "  - {rule: not_null, column: v}\n", data, max_samples=3)
+    result = only(report)
+    assert result.failing_rows == 11
+    assert [sample.row for sample in result.samples or ()] == [1, 3, 5]
+    assert result.more == 8
+
+
+def test_unique_counts_the_repeated_values_not_shown(tmp_path: Path) -> None:
+    data = b"v\n" + b"".join(b"%d\n%d\n" % (i, i) for i in range(10))
+    result = only(run(tmp_path, "  - {rule: unique, column: v}\n", data, max_samples=4))
+    assert [sample.value for sample in result.samples or ()] == ["0", "1", "2", "3"]
+    assert result.more == 6
+
+
+def test_no_samples_collects_none(tmp_path: Path) -> None:
+    checks = "  - {rule: not_null, column: note}\n  - {rule: unique, column: status}\n"
+    report = run(tmp_path, checks, max_samples=None)
+    assert [(r.failing_rows, r.samples, r.more) for r in report.results] == [
+        (2, None, 0),
+        (4, None, 0),
+    ]
+
+
+def test_passing_checks_have_no_samples(tmp_path: Path) -> None:
+    report = run(tmp_path, "  - {rule: not_null, column: order_id}\n")
+    assert only(report).samples == ()
+
+
+def test_long_values_are_fetched_cut_with_their_length(tmp_path: Path) -> None:
+    long = "é" * 500
+    data = f"v\n{long}\n{long}\n".encode()
+    sample = (only(run(tmp_path, "  - {rule: unique, column: v}\n", data)).samples or ())[0]
+    assert sample.length == 500
+    assert sample.cut
+    assert sample.value == "é" * 81  # only what is needed to show 80 characters
+
+
+def test_row_numbers_count_records_not_lines(tmp_path: Path) -> None:
+    # Quoted line breaks do not start a new row.
+    data = b'id,note\n1,"a\nb"\n2,\n3,"c\n\nd"\n4,\n'
+    result = only(run(tmp_path, "  - {rule: not_null, column: note}\n", data))
+    assert [sample.row for sample in result.samples or ()] == [2, 4]
+
+
+def test_a_data_column_named_like_the_row_number_is_fine(tmp_path: Path) -> None:
+    data = b"rowgate_row,ROWGATE_ROW_\n1,\n1,2\n"
+    checks = "  - {rule: not_null, column: ROWGATE_ROW_}\n  - {rule: unique, column: rowgate_row}\n"
+    report = run(tmp_path, checks, data)
+    assert [(r.failing_rows, [x.row for x in r.samples or ()]) for r in report.results] == [
+        (1, [1]),
+        (2, [1]),
+    ]
+    assert _row_alias(["rowgate_row", "ROWGATE_ROW_"]) == "rowgate_row__"
+
+
+def test_parquet_samples_use_duckdb_text_form(tmp_path: Path) -> None:
+    target = tmp_path / "data.parquet"
+    duckdb.connect(":memory:").execute(
+        "COPY (SELECT * FROM (VALUES (1.5::DOUBLE), (1.5::DOUBLE), (1e20::DOUBLE), "  # noqa: S608 - test data
+        f"(1e20::DOUBLE)) t(x)) TO '{target}' (FORMAT parquet)"
+    )
+    result = only(run(tmp_path, "  - {rule: unique, column: x}\n", name="data.parquet"))
+    assert [(s.value, s.count) for s in result.samples or ()] == [("1.5", 2), ("1e+20", 2)]
+    assert not result.text_values
+
+
+@pytest.mark.parametrize(
+    ("column_type", "family"),
+    [
+        ("VARCHAR", "text"),
+        ("BIGINT", "integer"),
+        ("UHUGEINT", "integer"),
+        ("DECIMAL(10,2)", "decimal"),
+        ("DOUBLE", "float"),
+        ("FLOAT", "float"),
+        ("BOOLEAN", "boolean"),
+        ("DATE", "date"),
+        ("TIMESTAMP", "timestamp"),
+        ("TIMESTAMP WITH TIME ZONE", "timestamp"),
+        ("TIME", "other"),
+        ("INTEGER[]", "other"),
+        ("STRUCT(a INTEGER)", "other"),
+    ],
+)
+def test_type_families(column_type: str, family: str) -> None:
+    assert type_family(column_type) == family

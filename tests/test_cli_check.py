@@ -56,7 +56,9 @@ def test_a_failing_check_exits_with_code_1(tmp_path: Path) -> None:
         "PASS  1. columns_exist: all 2 columns present\n"
         "PASS  2. row_count: 4 rows, expected at least 1\n"
         "WARN  3. not_null 'amount': 1 of 4 rows is NULL\n"
+        "        row 2: NULL\n"
         "FAIL  4. unique 'order_id': 2 of 4 rows have a value that appears more than once\n"
+        "        row 3: '1003', appears 2 times\n"
         "\n"
         "4 checks: 2 passed, 1 failed, 1 warned\n"
     )
@@ -95,7 +97,7 @@ def test_a_missing_column_exits_with_code_2(tmp_path: Path) -> None:
     code, out, err = run("check", str(project(tmp_path, rules)))
     assert (code, out) == (2, "")
     assert err == (
-        "error: a check refers to a column that 'orders.csv' does not have\n"
+        "error: a check cannot run on 'orders.csv'\n"
         "  check 4 (unique): no column 'orderid' (did you mean 'order_id'?)\n"
         "  the file has 3 columns: 'order_id', 'status', 'amount'\n"
     )
@@ -138,7 +140,7 @@ def test_a_bad_rules_file_exits_with_code_2(tmp_path: Path) -> None:
 
 
 def test_internal_errors_exit_with_code_2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def broken(*args: object) -> None:
+    def broken(*args: object, **kwargs: object) -> None:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(cli, "run_checks", broken)
@@ -318,3 +320,138 @@ def test_with_debug_duckdb_message_is_printed(duckdb_meets_a_bad_line: Path) -> 
     assert "DuckDB's original message (it can include data values from the file):\n" in err
     assert "private-value" in err  # DuckDB quotes the row
     assert err.endswith("error: DuckDB could not read line 3 of 'orders.csv' as CSV\n")
+
+
+# --- samples on the command line ------------------------------------------------------------------
+
+MANY = b"order_id,status,amount\n" + b"".join(b"%d,s,\n" % i for i in range(1, 13))
+NOT_NULL_AMOUNT = (
+    "version: 1\nsource: {path: orders.csv}\nchecks:\n  - {rule: not_null, column: amount}\n"
+)
+
+
+def test_five_samples_are_shown_by_default(tmp_path: Path) -> None:
+    code, out, _ = run("check", str(project(tmp_path, NOT_NULL_AMOUNT, MANY)))
+    assert code == 1
+    assert out.splitlines()[2:9] == [
+        "FAIL  1. not_null 'amount': 12 of 12 rows are NULL",
+        "        row 1: NULL",
+        "        row 2: NULL",
+        "        row 3: NULL",
+        "        row 4: NULL",
+        "        row 5: NULL",
+        "        ... and 7 more rows",
+    ]
+
+
+@pytest.mark.parametrize(("value", "shown"), [("1", 1), ("12", 12), ("1000", 12)])
+def test_max_samples(tmp_path: Path, value: str, shown: int) -> None:
+    code, out, _ = run(
+        "check", str(project(tmp_path, NOT_NULL_AMOUNT, MANY)), "--max-samples", value
+    )
+    assert code == 1
+    assert sum(1 for line in out.splitlines() if line.startswith("        row ")) == shown
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1001", "abc", "2.5"])
+def test_max_samples_outside_1_to_1000_is_a_usage_error(tmp_path: Path, value: str) -> None:
+    code, out, err = run("check", str(project(tmp_path)), "--max-samples", value)
+    assert (code, out) == (2, "")
+    assert err
+
+
+def test_no_samples_shows_none(tmp_path: Path) -> None:
+    code, out, _ = run("check", str(project(tmp_path, NOT_NULL_AMOUNT, MANY)), "--no-samples")
+    assert code == 1
+    assert out.splitlines()[2:] == [
+        "FAIL  1. not_null 'amount': 12 of 12 rows are NULL",
+        "",
+        "1 check: 0 passed, 1 failed, 0 warned",
+    ]
+
+
+def test_no_samples_wins_over_max_samples(tmp_path: Path) -> None:
+    rules = str(project(tmp_path, NOT_NULL_AMOUNT, MANY))
+    assert run("check", rules, "--no-samples", "--max-samples", "9") == run(
+        "check", rules, "--no-samples"
+    )
+
+
+def test_debug_and_no_samples_together_are_a_usage_error(tmp_path: Path) -> None:
+    code, out, err = run("check", str(project(tmp_path)), "--no-samples", "--debug")
+    assert (code, out) == (2, "")
+    assert err == ("error: --debug can print data values, so it cannot be used with --no-samples\n")
+
+
+def test_internal_errors_with_no_samples_show_only_the_error_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("value private-value broke something")
+
+    monkeypatch.setattr(cli, "run_checks", broken)
+    code, _, err = run("check", str(project(tmp_path)), "--no-samples")
+    assert code == 2
+    assert err == (
+        "error: internal error: RuntimeError (run again with --debug to see the traceback)\n"
+    )
+
+
+UNIQUE_V = "version: 1\nsource: {path: orders.csv}\nchecks:\n  - {rule: unique, column: v}\n"
+
+
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [
+        (b"plain", "'plain'"),
+        (b"line\nbreak", "'line\\nbreak'"),
+        (b"\x1b[31mred\x1b[0m", "'\\x1b[31mred\\x1b[0m'"),
+        (b"[bold]markup[/bold]", "'[bold]markup[/bold]'"),
+        ("\u202eevil".encode(), "'\\u202eevil'"),  # right-to-left override
+        (b"tab\there", "'tab\\there'"),
+        (b"it's", '"it\'s"'),
+        (b"", "''"),
+    ],
+    ids=["plain", "newline", "ansi", "rich-markup", "bidi", "tab", "quote", "empty"],
+)
+def test_sample_values_are_escaped(tmp_path: Path, value: bytes, shown: str) -> None:
+    field = b'"' + value.replace(b'"', b'""') + b'"'
+    data = b"v\n" + field + b"\n" + field + b"\n"
+    code, out, _ = run("check", str(project(tmp_path, UNIQUE_V, data)))
+    assert code == 1
+    assert f"        row 1: {shown}, appears 2 times\n" in out
+    assert "\x1b" not in out
+    assert "\u202e" not in out
+
+
+def test_long_values_are_cut_at_80_characters(tmp_path: Path) -> None:
+    long = "x" * 79 + "yz" + "w" * 919  # 1000 characters; the 81st is "z"
+    data = f"v\n{long}\n{long}\n".encode()
+    code, out, _ = run("check", str(project(tmp_path, UNIQUE_V, data)))
+    assert code == 1
+    shown = "x" * 79 + "y"
+    assert f"        row 1: '{shown}' [cut: 1000 characters in all], appears 2 times\n" in out
+
+
+def test_values_of_exactly_80_characters_are_not_cut(tmp_path: Path) -> None:
+    value = "v" * 80
+    data = f"v\n{value}\n{value}\n".encode()
+    _, out, _ = run("check", str(project(tmp_path, UNIQUE_V, data)))
+    assert f"        row 1: '{value}', appears 2 times\n" in out
+
+
+def test_unique_lists_how_many_repeated_values_are_not_shown(tmp_path: Path) -> None:
+    data = b"v\n" + b"".join(b"%d\n%d\n" % (i, i) for i in range(7))
+    _, out, _ = run("check", str(project(tmp_path, UNIQUE_V, data)), "--max-samples", "2")
+    assert out.splitlines()[2:6] == [
+        "FAIL  1. unique 'v': 14 of 14 rows have a value that appears more than once",
+        "        row 1: '0', appears 2 times",
+        "        row 3: '1', appears 2 times",
+        "        ... and 5 more repeated values",
+    ]
+
+
+def test_one_more_row_is_singular(tmp_path: Path) -> None:
+    data = b"order_id,status,amount\n1,a,\n2,b,\n"
+    _, out, _ = run("check", str(project(tmp_path, NOT_NULL_AMOUNT, data)), "--max-samples", "1")
+    assert "        ... and 1 more row\n" in out

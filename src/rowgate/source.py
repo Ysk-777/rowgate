@@ -156,6 +156,17 @@ class Dataset:
         params = {**self._params, **(params or {})}
         return _scalar(self._connection, sql, params, self.shown, self.file_format)
 
+    def row(self, sql: str, params: dict[str, object] | None = None) -> tuple[object, ...]:
+        """Run a query that reads ``self.relation`` and return its single row."""
+        merged = {**self._params, **(params or {})}
+        try:
+            found = self._connection.execute(sql, merged).fetchone()
+        except duckdb.Error as exc:
+            raise query_error(exc, self.shown, self.file_format) from None
+        if found is None:
+            raise DataError(f"DuckDB returned no result for {self.shown!r}")
+        return tuple(found)
+
     def close(self) -> None:
         self._connection.close()
 

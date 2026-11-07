@@ -19,6 +19,38 @@ A traceback is printed only when `--debug` is passed. When DuckDB fails to
 read the data, `--debug` also prints DuckDB's original message, which can
 include data values from the file.
 
+## Checking a file
+
+```bash
+rowgate check RULES.yaml [--no-samples] [--max-samples N] [--debug]
+```
+
+Each check prints one line, in the order of the rules file. A failing check
+also lists **samples**: up to 5 of its failing rows (`--max-samples N`, any
+N from 1 to 1000; anything else is a usage error, exit 2).
+
+- A sample shows the data row number and the value: `row 4: 'abc'`. Rows are
+  numbered from 1, the header is not counted, and a record that spans lines
+  inside quotes is one row. Samples are in file order: CSV files are read in
+  one thread, and Parquet rows keep their stored order.
+- Text values are shown in quotes, with Python's escapes for anything that is
+  not printable, so a line break, a terminal escape code or markup in the
+  data is shown as `\n`, `\x1b` and so on, never sent to the terminal.
+  Values of other types (numbers, dates) are shown in DuckDB's text form,
+  without quotes. A missing value is shown as `NULL`.
+- A value longer than 80 characters is cut to its first 80, followed by
+  `[cut: N characters in all]`.
+- For `unique`, each repeated value is shown once, with the row where it
+  first appears and how many rows have it, in order of first appearance.
+- If there are more failing rows than samples, the last line says how many
+  more (`... and 7 more rows`).
+
+`--no-samples` promises that no data value from the file appears anywhere in
+the output, error messages included: no samples are collected, an
+unexpected internal error is reported by its type only, and `--debug` (which
+can print DuckDB's own messages) cannot be combined with it (exit 2). If both
+are given, `--no-samples` wins over `--max-samples`.
+
 ## Writing values in the rules file
 
 RowGate reads YAML with PyYAML, which follows YAML 1.1. Some unquoted values
