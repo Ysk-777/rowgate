@@ -269,7 +269,7 @@ def _range_bound(value: object) -> RangeBound:
     if isinstance(value, bool):
         raise ValueError(f"expected a number or a date, got {describe_value(value)}")
     if isinstance(value, int):
-        return value
+        return _whole_number(value)
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError(f"must be a finite number, got {describe_value(value)}")

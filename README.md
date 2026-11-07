@@ -106,6 +106,30 @@ that decides how a value in the data is compared:
 - Whole numbers in the rules file may have up to 39 digits (the range of
   DuckDB's HUGEINT); a larger one is a rules error.
 
+### range
+
+`min` and `max` are inclusive, and at least one is required. They are both
+numbers or both dates (`2024-01-31`, quoted or not), and the column must fit:
+
+| Bounds | Text value (CSV, or a Parquet text column) | Parquet column |
+| ------ | ------------------------------------------- | -------------- |
+| numbers | must be a plain, finite number within the bounds | integer, decimal or float; a date column is exit 2 |
+| dates | must be a real ISO date (`YYYY-MM-DD`) within the bounds | date; a number column is exit 2 |
+
+- Whole numbers are compared exactly with whole-number bounds, as DuckDB
+  `HUGEINT`: `9007199254740993` fails `max: 9007199254740992`, which it would
+  pass as floating point. A whole number of more than 38 digits, a value with
+  a decimal point or exponent, a decimal bound such as `0.5`, and decimal and
+  float columns are compared as 64-bit floating point.
+- In text, anything that is not a plain number is a failing row: `nan`,
+  `inf`, `Infinity`, `" 5"`, `1_000`, `abc`, and the empty text. So is a
+  number too large for a 64-bit float, such as `1e400`: it would be infinity.
+- In a float column, NaN and infinity are failing rows for any range. (DuckDB
+  orders NaN above every number, so on its own it would pass a range that has
+  only a `min`.)
+- Timestamp columns are not supported yet (exit 2); see the
+  [roadmap](ROADMAP.md). Boolean, time, list and other columns are exit 2.
+
 ### regex
 
 The pattern must match the **whole** value, as if it were wrapped in `^` and

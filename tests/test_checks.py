@@ -17,10 +17,9 @@ from rowgate.checks import (
     _type_of,
     run_checks,
 )
-from rowgate.conditions import row_test, type_family
-from rowgate.errors import DataError, RowGateError
+from rowgate.conditions import type_family
+from rowgate.errors import DataError
 from rowgate.loader import load_rules
-from rowgate.rules import Range
 from rowgate.source import open_dataset
 
 ORDERS = b"""\
@@ -245,17 +244,6 @@ def test_a_comment_line_read_as_the_header_is_pointed_out(tmp_path: Path) -> Non
     ]
 
 
-def test_rules_from_a_later_milestone_are_refused_before_reading(tmp_path: Path) -> None:
-    with pytest.raises(RowGateError) as excinfo:
-        run(
-            tmp_path,
-            "  - {rule: not_null, column: id}\n  - {rule: range, column: id, min: 1}\n",
-        )
-    assert excinfo.value.message == (
-        "check 2 (range): this rule is not available yet in this development version of RowGate"
-    )
-
-
 # --- column names that look like SQL -----------------------------------------------------------
 
 
@@ -312,12 +300,6 @@ def test_checks_on_parquet(tmp_path: Path) -> None:
 
 
 # --- guards ----------------------------------------------------------------------------------
-
-
-def test_a_rule_without_a_condition_yet_is_an_internal_error() -> None:
-    check = Range(rule="range", column="id", min=1)
-    with pytest.raises(AssertionError):
-        row_test(1, check, "VARCHAR")
 
 
 def test_a_missing_count_is_a_data_error(tmp_path: Path) -> None:
@@ -770,3 +752,153 @@ def test_type_problems_and_missing_columns_are_listed_together(tmp_path: Path) -
         "  check 2 (not_null): no column 'w'",
         "  the file has 1 column: 'v'",
     ]
+
+
+# --- range ----------------------------------------------------------------------------------
+
+
+def range_check(bounds: str, column: str = "v") -> str:
+    return f"  - {{rule: range, column: {column}, {bounds}}}\n"
+
+
+def test_whole_numbers_are_compared_exactly_with_whole_bounds(tmp_path: Path) -> None:
+    # As a DOUBLE, 9007199254740993 rounds to 9007199254740992 and would pass.
+    data = b"v\n9007199254740992\n9007199254740993\n"
+    result = only(run(tmp_path, range_check("max: 9007199254740992"), data))
+    assert failing_values(result) == ["9007199254740993"]
+    assert result.summary == "1 of 2 rows is not a number of at most 9007199254740992"
+
+
+def test_exact_up_to_39_digits(tmp_path: Path) -> None:
+    top = 2**127 - 1
+    data = f"v\n{top}\n{top - 1}\n".encode()
+    result = only(run(tmp_path, range_check(f"max: {top - 1}"), data))
+    assert failing_values(result) == [str(top)]
+
+
+TEXT_NUMBERS = (
+    b'v\n5\n007\n1e2\n-0\n100\n0\n0.5\nnan\ninf\nInfinity\n1e400\n" 5"\n1_000\nabc\n""\n\n'
+    + b"1"
+    + b"0" * 40
+    + b"\n"
+    + b"9" * 400
+    + b"\n"
+)
+
+
+def test_text_must_be_a_plain_finite_number_in_range(tmp_path: Path) -> None:
+    result = only(run(tmp_path, range_check("min: 0, max: 100"), TEXT_NUMBERS, max_samples=50))
+    assert failing_values(result) == [
+        "nan", "inf", "Infinity", "1e400", " 5", "1_000", "abc", "",
+        "1" + "0" * 40,  # a plain number, but over 100 (compared as DOUBLE past 38 digits)
+        "9" * 81,  # 400 digits: past the largest DOUBLE, so not finite (81 characters
+        # are fetched so that cutting can be detected; 80 are shown)
+    ]  # fmt: skip
+    assert result.failing_rows == 10  # the NULL is ignored
+
+
+def test_bounds_are_inclusive(tmp_path: Path) -> None:
+    data = b"v\n0\n100\n0.0\n1e2\n-0.0001\n100.0001\n"
+    result = only(run(tmp_path, range_check("min: 0, max: 100"), data))
+    assert failing_values(result) == ["-0.0001", "100.0001"]
+
+
+def test_decimal_bounds_compare_as_floating_point(tmp_path: Path) -> None:
+    data = b"v\n0.5\n0.49\n1\n"
+    result = only(run(tmp_path, range_check("min: 0.5"), data))
+    assert failing_values(result) == ["0.49"]
+
+
+def test_a_range_with_only_one_bound(tmp_path: Path) -> None:
+    data = b"v\n-5\n5\n50\n"
+    low = only(run(tmp_path, range_check("min: 0"), data))
+    high = only(run(tmp_path / ".." / tmp_path.name, range_check("max: 10"), data))
+    assert (failing_values(low), low.summary) == (
+        ["-5"],
+        "1 of 3 rows is not a number of at least 0",
+    )
+    assert (failing_values(high), high.summary) == (
+        ["50"],
+        "1 of 3 rows is not a number of at most 10",
+    )
+
+
+def test_a_passing_range(tmp_path: Path) -> None:
+    result = only(run(tmp_path, range_check("min: 1, max: 9"), b"v\n1\n9\n"))
+    assert (result.ok, result.summary) == (True, "every value is a number from 1 to 9")
+
+
+def test_dates_in_text_must_be_real_iso_dates(tmp_path: Path) -> None:
+    data = b"v\n2024-01-31\n01/02/2024\n2024-02-30\n\n2024-1-31\n2025-01-01\n2024-12-31\n"
+    result = only(run(tmp_path, range_check("min: 2024-01-01, max: 2024-12-31"), data))
+    assert failing_values(result) == ["01/02/2024", "2024-02-30", "2024-1-31", "2025-01-01"]
+    assert result.summary == "4 of 7 rows are not a date from 2024-01-01 to 2024-12-31"
+
+
+@pytest.mark.parametrize(
+    ("values", "cast", "bounds", "failing"),
+    [
+        ("9007199254740992, 9007199254740993, NULL", "::BIGINT", "max: 9007199254740992",
+         ["9007199254740993"]),
+        ("1.50, 10.01", "::DECIMAL(10,2)", "max: 10", ["10.01"]),
+        ("DATE '2024-01-31', DATE '2025-01-01'", "", "max: 2024-12-31", ["2025-01-01"]),
+        ("'5', 'x', '50'", "", "max: 10", ["x", "50"]),
+    ],
+    ids=["bigint-exact", "decimal", "date", "varchar"],
+)  # fmt: skip
+def test_range_on_parquet_types(
+    tmp_path: Path, values: str, cast: str, bounds: str, failing: list[str]
+) -> None:
+    parquet(tmp_path, values, cast)
+    assert failing_values(only(run(tmp_path, range_check(bounds), name="data.parquet"))) == failing
+
+
+@pytest.mark.parametrize("cast", ["::DOUBLE", "::FLOAT"])
+@pytest.mark.parametrize("bounds", ["min: 0", "max: 10", "min: 0, max: 10"])
+def test_nan_and_infinity_fail_any_range(tmp_path: Path, cast: str, bounds: str) -> None:
+    # DuckDB orders NaN above every number, so a min-only range would pass it.
+    parquet(tmp_path, "1.0, 'nan', 'inf', '-inf', 5.0, NULL", cast)
+    result = only(run(tmp_path, range_check(bounds), name="data.parquet"))
+    assert failing_values(result) == ["nan", "inf", "-inf"]
+
+
+@pytest.mark.parametrize(
+    ("values", "bounds", "problem"),
+    [
+        ("DATE '2024-01-31'", "max: 5",
+         "column 'v' holds dates (DATE), but the bounds are numbers; write them as dates, "
+         "like 2024-01-31"),
+        ("5::BIGINT", "max: 2024-12-31",
+         "column 'v' holds numbers (BIGINT), but the bounds are dates; write them as numbers"),
+        ("TIMESTAMP '2024-01-31 10:00:00'", "max: 2024-12-31",
+         "column 'v' is TIMESTAMP; range on timestamps is not supported yet"),
+        ("TIMESTAMPTZ '2024-01-31 10:00:00+00'", "max: 5",
+         "column 'v' is TIMESTAMP WITH TIME ZONE; range on timestamps is not supported yet"),
+        ("true", "max: 1", "range does not support BOOLEAN columns (column 'v')"),
+        ("true", "max: 2024-12-31", "range does not support BOOLEAN columns (column 'v')"),
+        ("TIME '10:00:00'", "max: 1", "range does not support TIME columns (column 'v')"),
+    ],
+    ids=[
+        "number-on-date", "date-on-bigint", "timestamp", "timestamptz", "boolean",
+        "date-on-boolean", "time",
+    ],
+)  # fmt: skip
+def test_bounds_that_do_not_fit_the_column_type_are_exit_2(
+    tmp_path: Path, values: str, bounds: str, problem: str
+) -> None:
+    parquet(tmp_path, values)
+    with pytest.raises(DataError) as excinfo:
+        run(tmp_path, range_check(bounds), name="data.parquet")
+    assert excinfo.value.lines() == [
+        "error: a check cannot run on 'data.parquet'",
+        f"  check 1 (range): {problem}",
+    ]
+
+
+def test_text_past_the_largest_double_fails_a_min_only_range(tmp_path: Path) -> None:
+    # 1e400 is a plain number, but as a DOUBLE it is infinity, which is not a
+    # finite number in range even though it is above any minimum.
+    data = b"v\n1e400\n" + b"9" * 400 + b"\n5\n"
+    result = only(run(tmp_path, range_check("min: 0"), data))
+    assert result.failing_rows == 2
+    assert [sample.row for sample in result.samples or ()] == [1, 2]

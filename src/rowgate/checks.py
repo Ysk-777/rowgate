@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Literal
 
 from rowgate.conditions import RowRule, RowTest, row_test, type_family, type_problem
-from rowgate.errors import DataError, RowGateError
+from rowgate.errors import DataError
 from rowgate.rules import (
     Check,
     ColumnsExist,
@@ -98,9 +98,6 @@ class Report:
         return 1 if self.count("failed") else 0
 
 
-NOT_AVAILABLE_YET = (Range,)
-
-
 def run_checks(
     rules: RulesFile, rules_path: Path, max_samples: int | None = DEFAULT_SAMPLES
 ) -> Report:
@@ -109,7 +106,6 @@ def run_checks(
     ``max_samples`` is how many failing rows to sample per check; None
     collects none, so no data value leaves DuckDB.
     """
-    _refuse_rules_not_available_yet(rules)
     with open_dataset(rules_path, rules.source) as dataset:
         _require_runnable(rules, dataset)
         tests = {
@@ -143,15 +139,6 @@ def checked_column(check: Check) -> str | None:
     if isinstance(check, ColumnsExist | RowCount):
         return None
     return check.column
-
-
-def _refuse_rules_not_available_yet(rules: RulesFile) -> None:
-    for index, check in enumerate(rules.checks, 1):
-        if isinstance(check, NOT_AVAILABLE_YET):
-            raise RowGateError(
-                f"check {index} ({check.rule}): this rule is not available yet in this "
-                "development version of RowGate"
-            )
 
 
 def _type_of(dataset: Dataset, name: str) -> str:
@@ -320,6 +307,13 @@ def _row_result(
             if failing
             else "every value matches the pattern"
         )
+    elif isinstance(check, Range):
+        wanted = _range_words(check)
+        summary = (
+            f"{of_rows} {'is' if one else 'are'} not {wanted}"
+            if failing
+            else f"every value is {wanted}"
+        )
     else:
         summary = f"{of_rows} {'is' if one else 'are'} NULL" if failing else "no NULL values"
     more = failing - len(samples) if samples is not None else 0
@@ -328,6 +322,16 @@ def _row_result(
         index, check.rule, check.column, check.severity, failing == 0, failing, summary,
         samples, more, text,
     )  # fmt: skip
+
+
+def _range_words(check: Range) -> str:
+    low, high = check.min, check.max
+    noun = "a number" if check.kind == "number" else "a date"
+    if low is not None and high is not None:
+        return f"{noun} from {low} to {high}"
+    if low is not None:
+        return f"{noun} of at least {low}"
+    return f"{noun} of at most {high}"
 
 
 def _unique(index: int, check: Unique, dataset: Dataset, max_samples: int | None) -> CheckResult:

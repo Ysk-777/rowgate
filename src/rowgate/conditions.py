@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from rowgate.rules import InSet, NotNull, Range, Regex
-from rowgate.sql import quote_identifier, text_as_integer, text_as_number
+from rowgate.sql import quote_identifier, text_as_date, text_as_integer, text_as_number
 
 Family = Literal["text", "integer", "decimal", "float", "boolean", "date", "timestamp", "other"]
 RowRule = NotNull | InSet | Range | Regex
@@ -58,6 +58,8 @@ def type_problem(check: RowRule, column_type: str) -> str | None:
     family = type_family(column_type)
     if isinstance(check, InSet):
         return _in_set_problem(check, column_type, family)
+    if isinstance(check, Range):
+        return _range_problem(check, column_type, family)
     return None  # not_null and regex run on any column
 
 
@@ -80,6 +82,28 @@ def _in_set_problem(check: InSet, column_type: str, family: Family) -> str | Non
             "write true or false"
         )
     return f"in_set does not support {column_type} columns (column {check.column!r})"
+
+
+def _range_problem(check: Range, column_type: str, family: Family) -> str | None:
+    if family == "timestamp":
+        return f"column {check.column!r} is {column_type}; range on timestamps is not supported yet"
+    if check.kind == "number":
+        if family == "text" or family in NUMERIC:
+            return None
+        if family == "date":
+            return (
+                f"column {check.column!r} holds dates (DATE), but the bounds are numbers; "
+                "write them as dates, like 2024-01-31"
+            )
+    else:
+        if family in ("text", "date"):
+            return None
+        if family in NUMERIC:
+            return (
+                f"column {check.column!r} holds numbers ({column_type}), but the bounds are "
+                "dates; write them as numbers"
+            )
+    return f"range does not support {column_type} columns (column {check.column!r})"
 
 
 @dataclass(frozen=True)
@@ -112,8 +136,9 @@ def row_test(index: int, check: RowRule, column_type: str) -> RowTest:
         )
     if isinstance(check, InSet):
         passes, params = _in_set(check, column, family, prefix)
-        return RowTest(f"{column} IS NOT NULL AND NOT coalesce({passes}, false)", shown, params)
-    raise AssertionError(f"{check.rule} is not available yet")  # refused before the run
+    else:
+        passes, params = _in_range(check, column, family, prefix)
+    return RowTest(f"{column} IS NOT NULL AND NOT coalesce({passes}, false)", shown, params)
 
 
 def _in_set(
@@ -162,3 +187,37 @@ def _in_number_set(
         f"ELSE list_contains(${prefix}numbers, {number}) END",
         params,
     )
+
+
+def _in_range(
+    check: Range, column: str, family: Family, prefix: str
+) -> tuple[str, dict[str, object]]:
+    params: dict[str, object] = {}
+    parts: list[str] = []
+    bounds = [(check.min, ">=", f"{prefix}min"), (check.max, "<=", f"{prefix}max")]
+    if family == "text" and check.kind == "number":
+        number = text_as_number(column)
+        whole = text_as_integer(column)
+        parts.append(f"isfinite({number})")  # nan, inf and 1e400 fail
+        for bound, op, name in bounds:
+            if bound is None:
+                continue
+            params[name] = bound
+            if isinstance(bound, int):
+                # Whole numbers exactly, as HUGEINT; anything else as DOUBLE.
+                parts.append(f"coalesce({whole} {op} ${name}, {number} {op} ${name})")
+            else:
+                parts.append(f"{number} {op} ${name}")
+        return " AND ".join(parts), params
+    value = column
+    if family == "text":  # dates written as text
+        value = text_as_date(column)
+        parts.append(f"{value} IS NOT NULL")
+    elif family == "float":
+        parts.append(f"isfinite({column})")  # NaN and infinity fail
+    for bound, op, name in bounds:
+        if bound is None:
+            continue
+        params[name] = bound
+        parts.append(f"{value} {op} ${name}")
+    return " AND ".join(parts), params

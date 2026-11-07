@@ -1013,3 +1013,13 @@ def test_whole_numbers_up_to_hugeint_are_fine(tmp_path: Path) -> None:
     [check] = rules.checks
     assert isinstance(check, InSet)
     assert check.values == [2**127 - 1, -(2**127)]
+
+
+def test_range_bounds_past_hugeint_are_refused(tmp_path: Path) -> None:
+    text = rules_text(f"{{rule: range, column: v, max: {2**127}}}")
+    [problem] = problems(tmp_path, text)
+    assert split_problem(problem) == (
+        "check 1 (range), field 'max'",
+        "whole numbers must be between -2^127 and 2^127 - 1 (up to 39 digits), "
+        "got a 39-digit number",
+    )
