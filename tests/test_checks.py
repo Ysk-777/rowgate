@@ -18,11 +18,12 @@ from rowgate.checks import (
     _type_of,
     run_checks,
 )
-from rowgate.conditions import row_test, type_family
+from rowgate.conditions import Scan, row_test, type_family
 from rowgate.errors import DataError
 from rowgate.loader import load_rules
-from rowgate.rules import InSet
+from rowgate.rules import InSet, NotNull, Range, Regex
 from rowgate.source import open_dataset
+from rowgate.sql import text_as_number
 
 ORDERS = b"""\
 order_id,status,amount,note
@@ -919,10 +920,42 @@ def test_a_large_set_is_matched_with_a_hash_join(tmp_path: Path) -> None:
         check = InSet.model_validate(
             {"rule": "in_set", "column": "v", "values": load_values(kind[column_type])}
         )
-        assert "list_contains" not in row_test(1, check, column_type).fails
+        assert "list_contains" not in row_test(1, check, column_type, Scan(["v"])).fails
 
 
 def load_values(flow: str) -> list[object]:
     values = yaml.safe_load(flow)
     assert isinstance(values, list)
     return values
+
+
+# --- what the combined scan selects ------------------------------------------------------
+
+
+def test_the_scan_selects_only_the_columns_the_checks_name() -> None:
+    # The quoted name of x (\"x\") is part of the quoted name of x" (\"x\"\"\"),
+    # so a search of the SQL text would also select x.
+    scan = Scan(["x", 'x"', "unused", "id"])
+    row_test(1, NotNull(rule="not_null", column='x"'), "VARCHAR", scan)
+    row_test(2, Regex(rule="regex", column="id", pattern="[0-9]+"), "VARCHAR", scan)
+    assert scan.select_list() == ['"x"""', '"id"']
+
+
+def test_text_is_converted_to_a_number_once_per_row() -> None:
+    scan = Scan(["v", "w"])
+    first = row_test(1, Range(rule="range", column="v", min=0, max=10), "VARCHAR", scan)
+    second = row_test(2, Range(rule="range", column="v", min=5), "VARCHAR", scan)
+    conversion = text_as_number('"v"')
+    assert conversion in scan.computed  # computed once in the scan, for both checks
+    for expression, name in scan.computed.items():
+        assert expression not in first.fails
+        assert expression not in second.fails
+        assert name in first.fails
+
+
+def test_names_for_computed_values_avoid_the_data_columns(tmp_path: Path) -> None:
+    data = b"rowgate_row,ROWGATE_VALUE_1,rowgate_value_1_,v\na,b,c,5\nd,e,f,50\ng,h,i,x\n"
+    checks = range_check("min: 0, max: 10") + in_set("[1, 5]")
+    first, second = run(tmp_path, checks, data).results
+    assert [(s.row, s.value) for s in first.samples or ()] == [(2, "50"), (3, "x")]
+    assert [(s.row, s.value) for s in second.samples or ()] == [(2, "50"), (3, "x")]

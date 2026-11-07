@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from rowgate.conditions import RowRule, RowTest, row_test, type_family, type_problem
+from rowgate.conditions import RowRule, RowTest, Scan, row_test, type_family, type_problem
 from rowgate.errors import DataError
 from rowgate.rules import (
     Check,
@@ -108,12 +108,13 @@ def run_checks(
     """
     with open_dataset(rules_path, rules.source) as dataset:
         _require_runnable(rules, dataset)
+        scan = Scan(dataset.column_names)
         tests = {
-            index: row_test(index, check, _type_of(dataset, check.column))
+            index: row_test(index, check, _type_of(dataset, check.column), scan)
             for index, check in enumerate(rules.checks, 1)
             if isinstance(check, NotNull | InSet | Range | Regex)
         }
-        found = _scan_row_checks(dataset, tests, max_samples)
+        found = _scan_row_checks(dataset, tests, scan, max_samples)
         results: list[CheckResult] = []
         for index, check in enumerate(rules.checks, 1):
             if isinstance(check, ColumnsExist):
@@ -204,18 +205,17 @@ def _sample_struct(row: str, shown: str, extra: str = "") -> str:
 
 
 def _scan_row_checks(
-    dataset: Dataset, tests: dict[int, RowTest], max_samples: int | None
+    dataset: Dataset, tests: dict[int, RowTest], scan: Scan, max_samples: int | None
 ) -> dict[int, tuple[int, tuple[Sample, ...] | None]]:
-    """Count (and sample) the failing rows of every row-level check in one scan."""
+    """Count (and sample) the failing rows of every row-level check in one scan.
+
+    The scan selects the columns and computed values the row tests asked
+    ``scan`` for, and nothing else.
+    """
     if not tests:
         return {}
-    row = _row_alias(dataset.column_names)
-    columns: list[str] = []
-    for test in tests.values():
-        for name in dataset.column_names:
-            quoted = quote_identifier(name)
-            if quoted in test.fails and quoted not in columns:
-                columns.append(quoted)
+    row = scan.new_name("rowgate_row")
+    columns = scan.select_list()
     selects: list[str] = []
     params: dict[str, object] = {}
     for test in tests.values():

@@ -7,7 +7,7 @@ parameters. No value from the rules file is written into SQL text.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from rowgate.rules import InSet, NotNull, Range, Regex
@@ -106,6 +106,56 @@ def _range_problem(check: Range, column_type: str, family: Family) -> str | None
     return f"range does not support {column_type} columns (column {check.column!r})"
 
 
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+@dataclass
+class Scan:
+    """What one scan of the data selects: the columns and computed values the checks use.
+
+    Row tests ask for their columns and conversions here, so the scan reads
+    exactly the columns the checks name, and a conversion that several
+    conditions use, such as text to number, is computed once per row.
+    """
+
+    column_names: list[str]
+    columns: list[str] = field(init=False, default_factory=list)  # quoted, in order of use
+    computed: dict[str, str] = field(init=False, default_factory=dict)  # SQL -> its name
+    _taken: set[str] = field(init=False, default_factory=set)
+
+    def __post_init__(self) -> None:
+        # DuckDB compares names ignoring ASCII case, so new names must not
+        # clash with a data column that way either.
+        self._taken = {name.translate(_ASCII_LOWER) for name in self.column_names}
+
+    def column(self, name: str) -> str:
+        """The quoted name of a data column, which the scan will select."""
+        quoted = quote_identifier(name)
+        if quoted not in self.columns:
+            self.columns.append(quoted)
+        return quoted
+
+    def value(self, expression: str) -> str:
+        """The name under which the scan computes ``expression`` once per row."""
+        name = self.computed.get(expression)
+        if name is None:
+            name = self.new_name(f"rowgate_value_{len(self.computed) + 1}")
+            self.computed[expression] = name
+        return name
+
+    def new_name(self, base: str) -> str:
+        """A quoted name that no data column and no other computed value has."""
+        name = base
+        while name in self._taken:
+            name += "_"
+        self._taken.add(name)
+        return quote_identifier(name)
+
+    def select_list(self) -> list[str]:
+        """The scan's select list: the columns, then each computed value with its name."""
+        return [*self.columns, *(f"{sql} AS {name}" for sql, name in self.computed.items())]
+
+
 @dataclass(frozen=True)
 class RowTest:
     """How a row-level check finds its failing rows in one pass over the data."""
@@ -115,12 +165,13 @@ class RowTest:
     params: dict[str, object]
 
 
-def row_test(index: int, check: RowRule, column_type: str) -> RowTest:
+def row_test(index: int, check: RowRule, column_type: str, scan: Scan) -> RowTest:
     """The failing-row condition for check number ``index`` on a column of this type.
 
-    Only not_null looks at NULLs; every other rule ignores them.
+    Only not_null looks at NULLs; every other rule ignores them. The
+    condition refers only to names that ``scan`` selects.
     """
-    column = quote_identifier(check.column)
+    column = scan.column(check.column)
     family = type_family(column_type)
     shown = column if family == "text" else f"CAST({column} AS VARCHAR)"
     prefix = f"c{index}_"
@@ -135,14 +186,14 @@ def row_test(index: int, check: RowRule, column_type: str) -> RowTest:
             {name: check.pattern},
         )
     if isinstance(check, InSet):
-        passes, params = _in_set(check, column, family, prefix)
+        passes, params = _in_set(check, column, family, prefix, scan)
     else:
-        passes, params = _in_range(check, column, family, prefix)
+        passes, params = _in_range(check, column, family, prefix, scan)
     return RowTest(f"{column} IS NOT NULL AND NOT coalesce({passes}, false)", shown, params)
 
 
 def _in_set(
-    check: InSet, column: str, family: Family, prefix: str
+    check: InSet, column: str, family: Family, prefix: str, scan: Scan
 ) -> tuple[str, dict[str, object]]:
     # Membership is written as "value IN (SELECT unnest($set))", which DuckDB
     # runs as a hash join. list_contains compares each row with every member:
@@ -157,11 +208,11 @@ def _in_set(
         # In text, only the lowercase words true and false are booleans.
         words = sorted({"true" if value else "false" for value in check.values})
         return f"{column} IN (SELECT unnest(${name}))", {name: words}
-    return _in_number_set(check, column, family, prefix)
+    return _in_number_set(check, column, family, prefix, scan)
 
 
 def _in_number_set(
-    check: InSet, column: str, family: Family, prefix: str
+    check: InSet, column: str, family: Family, prefix: str, scan: Scan
 ) -> tuple[str, dict[str, object]]:
     ints = [value for value in check.values if isinstance(value, int)]
     floats = [float(value) for value in check.values if isinstance(value, float)]
@@ -169,7 +220,7 @@ def _in_number_set(
     if family in ("decimal", "float"):
         params[f"{prefix}numbers"] = [float(value) for value in check.values]
         return f"CAST({column} AS DOUBLE) IN (SELECT unnest(${prefix}numbers))", params
-    whole = text_as_integer(column) if family == "text" else column
+    whole = scan.value(text_as_integer(column)) if family == "text" else column
     # A whole number is compared exactly with whole numbers in the set, and as
     # a DOUBLE with the decimal ones.
     exact: list[str] = []
@@ -184,7 +235,7 @@ def _in_number_set(
         return whole_match, params
     # Text: 01 is the whole number 1; 1.0 and 1e0 are compared as DOUBLE.
     params[f"{prefix}numbers"] = [float(value) for value in check.values]
-    number = text_as_number(column)
+    number = scan.value(text_as_number(column))
     return (
         f"CASE WHEN {whole} IS NOT NULL THEN {whole_match} "
         f"ELSE ({number}) IN (SELECT unnest(${prefix}numbers)) END",
@@ -193,14 +244,14 @@ def _in_number_set(
 
 
 def _in_range(
-    check: Range, column: str, family: Family, prefix: str
+    check: Range, column: str, family: Family, prefix: str, scan: Scan
 ) -> tuple[str, dict[str, object]]:
     params: dict[str, object] = {}
     parts: list[str] = []
     bounds = [(check.min, ">=", f"{prefix}min"), (check.max, "<=", f"{prefix}max")]
     if family == "text" and check.kind == "number":
-        number = text_as_number(column)
-        whole = text_as_integer(column)
+        number = scan.value(text_as_number(column))
+        whole = scan.value(text_as_integer(column))
         parts.append(f"isfinite({number})")  # nan, inf and 1e400 fail
         for bound, op, name in bounds:
             if bound is None:
@@ -214,7 +265,7 @@ def _in_range(
         return " AND ".join(parts), params
     value = column
     if family == "text":  # dates written as text
-        value = text_as_date(column)
+        value = scan.value(text_as_date(column))
         parts.append(f"{value} IS NOT NULL")
     elif family == "float":
         parts.append(f"isfinite({column})")  # NaN and infinity fail
