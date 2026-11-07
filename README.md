@@ -105,8 +105,9 @@ that decides how a value in the data is compared:
 - On Parquet columns: an integer column matches only whole members; a
   decimal column, such as `DECIMAL(18,2)`, matches only members it can hold
   exactly (`0.005` never matches); a `FLOAT` or `DOUBLE` column is compared
-  as `DOUBLE`, with each member turned into the nearest `DOUBLE`. NaN and
-  infinity are never in a set.
+  in its own type, with each member turned into the nearest `FLOAT` or
+  `DOUBLE`, so a `FLOAT` stored as `0.1` is in `[0.1]`. NaN and infinity are
+  never in a set.
 - With a set of booleans, `TRUE`, `True`, `1`, `yes` and `t` fail. To accept
   other spellings, use a set of text: `['TRUE', 'FALSE']`.
 - An empty text is a value: put `''` in the set to accept it.
@@ -138,9 +139,11 @@ numbers or both dates (`2024-01-31`, quoted or not), and the column must fit:
 - Parquet integer and decimal columns are compared exactly too: an integer
   column against `max: 2.5` passes 2 and fails 3, and a `DECIMAL(18,2)`
   value `1000000000000000.01` fails `max: 1000000000000000.005`.
-- `FLOAT` and `DOUBLE` columns are compared as `DOUBLE`: the bound is turned
-  into the nearest `DOUBLE`, so a `DOUBLE` value stored as `0.1` passes
-  `max: 0.1`. A bound too large for a `DOUBLE` becomes infinity.
+- `FLOAT` and `DOUBLE` columns are compared in their own type: the bound is
+  turned into the nearest `FLOAT` or `DOUBLE`, so a `FLOAT` value stored as
+  `0.1` passes `max: 0.1` and `min: 0.1`. (The `FLOAT` nearest to 0.1 is
+  0.100000001490116..., slightly above the `DOUBLE` nearest to it.) A bound
+  too large for the type becomes infinity.
 - In a float column, NaN and infinity are failing rows for any range. (DuckDB
   orders NaN above every number, so on its own it would pass a range that has
   only a `min`.)

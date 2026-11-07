@@ -1,4 +1,4 @@
-"""Numbers are compared exactly: decimal text, and Parquet decimals and integers."""
+"""Numbers are compared exactly: decimal text, Parquet decimals and integers, and FLOAT."""
 
 from __future__ import annotations
 
@@ -214,6 +214,25 @@ def test_in_set_on_parquet_integers_only_matches_whole_members(tmp_path: Path) -
 # --- Parquet FLOAT and DOUBLE --------------------------------------------------------------
 
 
+@pytest.mark.parametrize("bound", ["max: 0.1", "min: 0.1", "min: 0.1, max: 0.1"])
+def test_a_float_stored_as_0_1_is_within_0_1(tmp_path: Path, bound: str) -> None:
+    # The FLOAT nearest to 0.1 is 0.100000001490116..., above the DOUBLE 0.1.
+    parquet(tmp_path, "FLOAT", "0.1")
+    result = check(tmp_path, f"rule: range, column: v, {bound}", name="data.parquet")
+    assert (result.failing_rows, result.samples) == (0, ())
+
+
+def test_float_bounds_become_floats(tmp_path: Path) -> None:
+    parquet(tmp_path, "FLOAT", "0.1", "0.2", "'nan'", "3.4e38")
+    rule = "rule: range, column: v, min: 0.10000001, max: 0.2"
+    assert failing(check(tmp_path, rule, name="data.parquet")) == ["0.1", "nan", "3.4e+38"]
+    # Bounds too large for a FLOAT become infinity.
+    rule = "rule: range, column: v, max: 1.0e+39"
+    assert failing(check(tmp_path, rule, name="data.parquet")) == ["nan"]
+    rule = "rule: range, column: v, min: 1.0e+39"
+    assert failing(check(tmp_path, rule, name="data.parquet")) == ["0.1", "0.2", "nan", "3.4e+38"]
+
+
 def test_double_columns_compare_with_the_double_nearest_the_bound(tmp_path: Path) -> None:
     parquet(tmp_path, "DOUBLE", "0.1", "0.30000000000000004")
     result = check(tmp_path, "rule: range, column: v, min: 0.1, max: 0.3", name="data.parquet")
@@ -222,7 +241,10 @@ def test_double_columns_compare_with_the_double_nearest_the_bound(tmp_path: Path
     assert result.failing_rows == 0
 
 
-def test_in_set_on_double_columns_never_matches_infinity(tmp_path: Path) -> None:
+def test_in_set_on_float_columns_uses_the_column_type(tmp_path: Path) -> None:
+    parquet(tmp_path, "FLOAT", "0.1", "'inf'", "0.2")
+    rule = "rule: in_set, column: v, values: [0.1, 1.0e+39]"
+    assert failing(check(tmp_path, rule, name="data.parquet")) == ["inf", "0.2"]
     parquet(tmp_path, "DOUBLE", "0.1", "'inf'", "0.2")
     rule = "rule: in_set, column: v, values: [0.1, 1.0e+400]"
     assert failing(check(tmp_path, rule, name="data.parquet")) == ["inf", "0.2"]

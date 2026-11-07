@@ -43,7 +43,7 @@ INTEGER_TYPES = frozenset(
     }
 )
 NUMERIC: tuple[Family, ...] = ("integer", "decimal", "float")
-_FLOAT_TYPES = {"FLOAT": "DOUBLE", "DOUBLE": "DOUBLE"}  # fixed SQL text for each type
+_FLOAT_TYPES = {"FLOAT": "FLOAT", "DOUBLE": "DOUBLE"}  # fixed SQL text for each type
 _DECIMAL_TYPE = re.compile(r"DECIMAL\(([0-9]+),([0-9]+)\)")
 _KIND_WORDS = {"text": "text", "number": "numbers", "boolean": "booleans"}
 
@@ -231,7 +231,9 @@ def _in_number_set(
     name = f"{prefix}values"
     members = [value for value in check.values if not isinstance(value, bool | str)]
     if family == "float":
-        # Members too large for a DOUBLE would be infinity, which is never in a set.
+        # Each member becomes the column's own type, so a FLOAT value stored as
+        # 0.1 is in [0.1]. Members too large for the type would be infinity,
+        # which is never in a set.
         texts = [str(value) for value in members]
         sql_type = _FLOAT_TYPES[column_type]
         return (
@@ -302,7 +304,9 @@ def _in_range(
             parts.append(f"{value} {op} ${name}")
         return " AND ".join(parts), params
     if family == "float":
-        # NaN and infinity fail; DuckDB orders NaN above every number.
+        # Compared in the column's own type: the bound becomes a FLOAT for a
+        # FLOAT column, so a value stored as 0.1 passes max: 0.1. NaN and
+        # infinity fail; DuckDB orders NaN above every number.
         sql_type = _FLOAT_TYPES[column_type]
         parts.append(f"isfinite({column})")
         for bound, op, name in _number_bounds(check, prefix):
