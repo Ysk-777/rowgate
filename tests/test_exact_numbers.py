@@ -350,3 +350,74 @@ def test_conditions_refuse_what_validation_rules_out() -> None:
     members = InSet(rule="in_set", column="v", values=[1])
     with pytest.raises(AssertionError, match="unexpected decimal type"):
         row_test(1, members, "DECIMAL", Scan(["v"]))
+
+
+# --- how the exact comparison is computed ---------------------------------------------------
+
+
+def test_columns_named_like_the_lambda_parameters_change_nothing(tmp_path: Path) -> None:
+    # DuckDB reads name.field as a column called name when the query selects
+    # one. Here the checks select struct columns named like RowGate's lambda
+    # parameters, with the same fields; struct_extract keeps them out.
+    target = tmp_path / "data.parquet"
+    duckdb.connect(":memory:").execute(
+        "COPY (SELECT v, {'s': '-', 'i': '9', 'f': '9', 'x': '9'} AS rowgate_pieces, "  # noqa: S608 - test data
+        "{'sign': -1, 'digits': '9', 'exponent': 99} AS rowgate_number, '99' AS rowgate_core "
+        "FROM (VALUES ('0.30000000000000004'), ('0.3'), ('1e15'), ('1000000000000000.01')) t(v)) "
+        f"TO '{target}' (FORMAT parquet)"
+    )
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(
+        "version: 1\nsource: {path: data.parquet}\nchecks:\n"
+        "  - {rule: not_null, column: rowgate_pieces}\n"
+        "  - {rule: not_null, column: rowgate_number}\n"
+        "  - {rule: not_null, column: rowgate_core}\n"
+        "  - {rule: range, column: v, max: 0.3}\n"
+        "  - {rule: in_set, column: v, values: [0.3, 1000000000000000]}\n",
+        encoding="utf-8",
+    )
+    *_, in_range, in_set = run_checks(load_rules(rules), rules).results
+    assert failing(in_range) == ["0.30000000000000004", "1e15", "1000000000000000.01"]
+    assert failing(in_set) == ["0.30000000000000004", "1000000000000000.01"]
+
+
+def test_digits_are_worked_out_only_for_values_next_to_a_bound() -> None:
+    scan = Scan(["v"])
+    test = row_test(
+        1, Range(rule="range", column="v", min=Decimal(0), max=Decimal("0.3")), "VARCHAR", scan
+    )
+    [(expression, name)] = scan.derived.items()
+    assert expression.startswith("CASE WHEN (")  # NULL unless the DOUBLE is next to a bound
+    assert "regexp_extract" not in test.fails
+    assert name in test.fails
+
+
+@pytest.mark.parametrize(
+    ("bound", "text", "fails"),
+    [
+        ("max: 1.0e+60", "1" + "0" * 60, False),
+        ("max: 1.0e+60", "1" + "0" * 59 + "1", True),
+        ("min: 1.0e-60", "0." + "0" * 59 + "1", False),
+        ("min: 1.0e-60", "0." + "0" * 60 + "9", True),
+    ],
+)
+def test_bounds_too_long_to_write_plainly_are_still_exact(
+    tmp_path: Path, bound: str, text: str, fails: bool
+) -> None:
+    result = check(tmp_path, f"rule: range, column: v, {bound}", column(text))
+    assert result.failing_rows == int(fails)
+
+
+@pytest.mark.parametrize(
+    ("bound", "texts", "expected"),
+    [
+        ("max: 100", ["100", "100.0", "1e2", "100.00000000000001"], ["100.00000000000001"]),
+        ("min: 100", ["100", "100.0", "99.999999999999999"], ["99.999999999999999"]),
+        ("max: 0.10", ["0.10", "0.1", "0.100000000000000001"], ["0.100000000000000001"]),
+    ],
+)
+def test_values_written_like_the_bound_and_others_next_to_it(
+    tmp_path: Path, bound: str, texts: list[str], expected: list[str]
+) -> None:
+    result = check(tmp_path, f"rule: range, column: v, {bound}", column(*texts))
+    assert failing(result) == expected

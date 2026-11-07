@@ -184,10 +184,16 @@ RowGate never rounds a number before comparing it, in `in_set` or `range`:
   not the 64-bit float nearest to it, and `12345678.12345678901` keeps all
   19 digits.
 - A text value is compared with each bound as a 64-bit float first, which
-  settles almost every value at full speed. Only a value whose float is next
-  to the bound's (within one step) is then compared digit by digit, as sign,
-  digits and exponent. For `in_set`, a whole number is compared as a
-  `HUGEINT`, and any other number by its digits.
+  settles almost every value at full speed. A value whose float is next to
+  the bound's (within one step) is settled by its text if it is written
+  exactly like the bound (`100` for `max: 100`), and otherwise compared digit
+  by digit, as sign, digits and exponent. For `in_set`, a whole number is
+  compared as a `HUGEINT`, and any other number by its digits.
+- The digit-by-digit comparison costs time only for the values that need
+  it. Measured on 3 million rows in one thread: a range scan of ordinary
+  numbers takes about 0.8 s; if every value is within one step of the bound
+  and written differently from it (`100.00` for `max: 100`), about 2.5 s;
+  `in_set` with decimal members on decimal text, about 4 s.
 - So there is no limit at 38 significant digits, the most a DuckDB
   `DECIMAL` holds: a value with 60 digits is compared exactly with a bound
   with 50. (A fixed `DECIMAL(38,12)` would not do: it rounds

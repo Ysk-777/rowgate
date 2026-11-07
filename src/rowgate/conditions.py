@@ -18,8 +18,9 @@ from rowgate.display import quoted
 from rowgate.rules import HUGEINT_MAX, HUGEINT_MIN, InSet, NotNull, Range, Regex
 from rowgate.sql import (
     NUMBER_PATTERN,
-    number_compare,
+    compare_parts,
     number_key,
+    number_parts,
     quote_identifier,
     text_as_date,
     text_as_integer,
@@ -45,6 +46,7 @@ INTEGER_TYPES = frozenset(
 )
 NUMERIC: tuple[Family, ...] = ("integer", "decimal", "float")
 _FLOAT_TYPES = {"FLOAT": "FLOAT", "DOUBLE": "DOUBLE"}  # fixed SQL text for each type
+_PLAIN_DIGITS = 50  # numbers whose plain text would be longer are not text-matched
 _DECIMAL_TYPE = re.compile(r"DECIMAL\(([0-9]+),([0-9]+)\)")
 _KIND_WORDS = {"text": "text", "number": "numbers", "boolean": "booleans"}
 
@@ -134,11 +136,16 @@ class Scan:
     Row tests ask for their columns and conversions here, so the scan reads
     exactly the columns the checks name, and a conversion that several
     conditions use, such as text to number, is computed once per row.
+
+    Values come in two layers: those in ``computed`` use only data columns,
+    and those in ``derived`` may also use the names of computed values, so
+    a second conversion can build on a first without repeating it.
     """
 
     column_names: list[str]
     columns: list[str] = field(init=False, default_factory=list)  # quoted, in order of use
     computed: dict[str, str] = field(init=False, default_factory=dict)  # SQL -> its name
+    derived: dict[str, str] = field(init=False, default_factory=dict)  # SQL -> its name
     _taken: set[str] = field(init=False, default_factory=set)
 
     def __post_init__(self) -> None:
@@ -153,12 +160,17 @@ class Scan:
             self.columns.append(quoted)
         return quoted
 
-    def value(self, expression: str) -> str:
-        """The name under which the scan computes ``expression`` once per row."""
-        name = self.computed.get(expression)
+    def value(self, expression: str, *, derived: bool = False) -> str:
+        """The name under which the scan computes ``expression`` once per row.
+
+        With ``derived``, the expression may use the names of computed values.
+        """
+        values = self.derived if derived else self.computed
+        name = values.get(expression)
         if name is None:
-            name = self.new_name(f"rowgate_value_{len(self.computed) + 1}")
-            self.computed[expression] = name
+            count = len(self.computed) + len(self.derived) + 1
+            name = self.new_name(f"rowgate_value_{count}")
+            values[expression] = name
         return name
 
     def new_name(self, base: str) -> str:
@@ -172,6 +184,10 @@ class Scan:
     def select_list(self) -> list[str]:
         """The scan's select list: the columns, then each computed value with its name."""
         return [*self.columns, *(f"{sql} AS {name}" for sql, name in self.computed.items())]
+
+    def derived_list(self) -> list[str]:
+        """The select list of the second layer: each derived value with its name."""
+        return [f"{sql} AS {name}" for sql, name in self.derived.items()]
 
 
 @dataclass(frozen=True)
@@ -269,13 +285,19 @@ def _in_number_set(
     # number (1.0, 1e0, 0.30000000000000004, or more than 38 digits) by its
     # exact digits. Both are exact: 01 is 1, and 1000000000000000.01 is not
     # 1000000000000000.
+    # The key is computed in the scan, and only for values that need it, so
+    # the set is matched with a hash join on it.
     whole = scan.value(text_as_integer(column))
+    key = scan.value(
+        f"CASE WHEN {whole} IS NULL AND regexp_full_match({column}, '{NUMBER_PATTERN}') "
+        f"THEN {number_key(column)} END",
+        derived=True,
+    )
     keys = f"{prefix}keys"
     params[keys] = [numbers.parts(value).key for value in members]
     return (
         f"CASE WHEN {whole} IS NOT NULL THEN {whole_match.format(whole=whole)} "
-        f"ELSE regexp_full_match({column}, '{NUMBER_PATTERN}') "
-        f"AND {number_key(column)} IN (SELECT unnest(${keys})) END",
+        f"ELSE {key} IN (SELECT unnest(${keys})) END",
         params,
     )
 
@@ -323,11 +345,16 @@ def _in_range(
             parts.append(_exact_bound(column, bound, op, name, precision, scale, params))
         return " AND ".join(parts), params
     # Text: the number must be plain and finite as a DOUBLE (nan, inf and 1e400
-    # fail). It is compared as a DOUBLE where that settles the question, and
-    # by its exact digits where its DOUBLE is next to the bound's.
+    # fail). It is compared as a DOUBLE where that settles the question, by
+    # its text where it is written exactly like the bound, and otherwise by
+    # its exact digits. The digits are worked out in the scan, and only for
+    # values whose DOUBLE is next to a bound's.
     number = scan.value(text_as_number(column))
     parts.append(f"isfinite({number})")
-    for bound, op, name in _number_bounds(check, prefix):
+    bounds = _number_bounds(check, prefix)
+    near: list[str] = []
+    same_text: dict[str, str] = {}
+    for bound, _op, name in bounds:
         below, above = numbers.neighbours(bound)
         bound_parts = numbers.parts(bound)
         params |= {
@@ -337,12 +364,31 @@ def _in_range(
             f"{name}_digits": bound_parts.digits,
             f"{name}_exponent": bound_parts.exponent,
         }
-        exact = number_compare(column, f"{name}_sign", f"{name}_digits", f"{name}_exponent")
+        close = f"{number} >= ${name}_below AND {number} <= ${name}_above"
+        written = _plain_text(bound)
+        same_text[name] = ""
+        if written is not None:
+            params[f"{name}_text"] = written
+            close += f" AND {column} <> ${name}_text"
+            same_text[name] = f"WHEN {column} = ${name}_text THEN 0 "
+        near.append(f"({close})")
+    digits = scan.value(
+        f"CASE WHEN {' OR '.join(near)} THEN {number_parts(column)} END", derived=True
+    )
+    for _bound, op, name in bounds:
+        exact = compare_parts(digits, f"{name}_sign", f"{name}_digits", f"{name}_exponent")
         parts.append(
             f"(CASE WHEN {number} < ${name}_below THEN -1 WHEN {number} > ${name}_above THEN 1 "
-            f"ELSE {exact} END) {op} 0"
+            f"{same_text[name]}ELSE {exact} END) {op} 0"
         )
     return " AND ".join(parts), params
+
+
+def _plain_text(value: int | Decimal) -> str | None:
+    """``value`` written without an exponent, as data usually is; None if that is too long."""
+    if isinstance(value, Decimal) and abs(value.adjusted()) > _PLAIN_DIGITS:
+        return None
+    return str(value) if isinstance(value, int) else format(value, "f")
 
 
 def _bounds(check: Range, prefix: str) -> list[tuple[int | Decimal | date, str, str]]:

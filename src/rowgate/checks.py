@@ -220,6 +220,9 @@ def _scan_row_checks(
         inner = dataset.numbered(row, columns)
     else:
         inner = f"(SELECT {', '.join(columns)} FROM {dataset.relation})"  # noqa: S608
+    derived = scan.derived_list()
+    if derived:  # values computed from the computed values, one layer up
+        inner = f"(SELECT *, {', '.join(derived)} FROM {inner} AS rowgate_values)"  # noqa: S608
     sql = f"SELECT {', '.join(selects)} FROM {inner} AS rowgate_data"  # noqa: S608
     values = dataset.row(sql, params)
     step = 1 if max_samples is None else 2
