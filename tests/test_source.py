@@ -9,6 +9,7 @@ import io
 import lzma
 import os
 import re
+import sys
 import zipfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -610,8 +611,11 @@ def test_a_directory(tmp_path: Path) -> None:
     assert excinfo.value.message == "'data.csv' is a directory, not a data file"
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs named pipes")
 def test_something_that_is_not_a_regular_file(tmp_path: Path) -> None:
+    # A sys.platform check, unlike skipif, tells mypy that os.mkfifo is not
+    # used on Windows, where it does not exist.
+    if sys.platform == "win32":
+        pytest.skip("Windows has no named pipes in the file system (os.mkfifo)")
     os.mkfifo(tmp_path / "data.csv")
     with pytest.raises(DataError) as excinfo:
         open_dataset(tmp_path / "rules.yaml", source("data.csv"))

@@ -262,6 +262,8 @@ def test_unicode_column_names_on_a_cp1252_console(tmp_path: Path) -> None:
 def test_a_path_with_control_characters_is_printed_escaped(tmp_path: Path) -> None:
     # A colour code would contain '[', which source paths may not; a tab and a
     # bare escape character are enough to prove the path is not printed raw.
+    if sys.platform == "win32":
+        pytest.skip("Windows does not allow control characters in file names")
     (tmp_path / "x\ty\x1b.csv").write_bytes(b"id\n1\n")
     rules = tmp_path / "rules.yaml"
     rules.write_text(
