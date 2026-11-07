@@ -20,7 +20,7 @@ from rowgate.checks import (
 from rowgate.conditions import row_test, type_family
 from rowgate.errors import DataError, RowGateError
 from rowgate.loader import load_rules
-from rowgate.rules import InSet
+from rowgate.rules import Range
 from rowgate.source import open_dataset
 
 ORDERS = b"""\
@@ -249,10 +249,10 @@ def test_rules_from_a_later_milestone_are_refused_before_reading(tmp_path: Path)
     with pytest.raises(RowGateError) as excinfo:
         run(
             tmp_path,
-            "  - {rule: not_null, column: id}\n  - {rule: in_set, column: id, values: [x]}\n",
+            "  - {rule: not_null, column: id}\n  - {rule: range, column: id, min: 1}\n",
         )
     assert excinfo.value.message == (
-        "check 2 (in_set): this rule is not available yet in this development version of RowGate"
+        "check 2 (range): this rule is not available yet in this development version of RowGate"
     )
 
 
@@ -315,7 +315,7 @@ def test_checks_on_parquet(tmp_path: Path) -> None:
 
 
 def test_a_rule_without_a_condition_yet_is_an_internal_error() -> None:
-    check = InSet(rule="in_set", column="id", values=["1"])
+    check = Range(rule="range", column="id", min=1)
     with pytest.raises(AssertionError):
         row_test(1, check, "VARCHAR")
 
@@ -610,3 +610,163 @@ def test_regex_on_non_text_parquet_columns_uses_duckdb_text_form(
     result = only(run(tmp_path, regex(pattern, "x"), name="data.parquet"))
     assert [s.value for s in result.samples or ()] == failing_values
     assert not result.text_values
+
+
+# --- in_set ---------------------------------------------------------------------------------
+
+
+def in_set(values: str, column: str = "v") -> str:
+    return f"  - {{rule: in_set, column: {column}, values: {values}}}\n"
+
+
+def failing_values(result: CheckResult) -> list[str | None]:
+    return [sample.value for sample in result.samples or ()]
+
+
+NUMBER_TEXTS = b'v\n1\n1.0\n01\n" 1"\n1e0\n+1\n1.\n-0\n.5\n""\n\nabc\n2\n'
+
+
+def test_a_number_set_on_text_compares_plain_numbers(tmp_path: Path) -> None:
+    # 1, 1.0, 01, 1e0, +1 and 1. are all the number 1; " 1" is not a plain
+    # number. The empty text is a value (not a number), the NULL is ignored.
+    result = only(run(tmp_path, in_set("[1]"), NUMBER_TEXTS, max_samples=50))
+    assert failing_values(result) == [" 1", "-0", ".5", "", "abc", "2"]
+    assert result.summary == "6 of 13 rows have a value outside the set"
+
+
+def test_decimal_set_values_match_any_spelling(tmp_path: Path) -> None:
+    result = only(run(tmp_path, in_set("[1.0, 0.5]"), NUMBER_TEXTS, max_samples=50))
+    assert failing_values(result) == [" 1", "-0", "", "abc", "2"]
+
+
+def test_a_text_set_compares_text_exactly(tmp_path: Path) -> None:
+    result = only(run(tmp_path, in_set("['1']"), NUMBER_TEXTS, max_samples=50))
+    assert failing_values(result) == [
+        "1.0", "01", " 1", "1e0", "+1", "1.", "-0", ".5", "", "abc", "2"
+    ]  # fmt: skip
+
+
+def test_text_sets_are_case_sensitive_and_can_hold_the_empty_text(tmp_path: Path) -> None:
+    data = b'v\nnew\nNew\n""\n\npaid\n'
+    result = only(run(tmp_path, in_set("[new, paid, '']"), data))
+    assert failing_values(result) == ["New"]
+
+
+def test_whole_numbers_are_compared_exactly(tmp_path: Path) -> None:
+    data = b"v\n9007199254740992\n9007199254740993\n170141183460469231731687303715884105727\n"
+    result = only(
+        run(tmp_path, in_set("[9007199254740992, 170141183460469231731687303715884105727]"), data)
+    )
+    assert failing_values(result) == ["9007199254740993"]  # as a DOUBLE it would match
+
+
+BOOLEAN_TEXTS = b'v\ntrue\nfalse\nTRUE\nTrue\n1\nyes\nt\n""\n\n'
+
+
+def test_a_boolean_set_on_text_matches_lowercase_true_and_false_only(tmp_path: Path) -> None:
+    result = only(run(tmp_path, in_set("[true]"), BOOLEAN_TEXTS, max_samples=50))
+    assert failing_values(result) == ["false", "TRUE", "True", "1", "yes", "t", ""]
+    both = only(run(tmp_path / ".." / tmp_path.name, in_set("[true, false]"), BOOLEAN_TEXTS))
+    assert both.failing_rows == 6
+
+
+def test_other_spellings_of_booleans_need_a_text_set(tmp_path: Path) -> None:
+    result = only(run(tmp_path, in_set("['TRUE', 'FALSE']"), BOOLEAN_TEXTS, max_samples=50))
+    assert failing_values(result) == ["true", "false", "True", "1", "yes", "t", ""]
+
+
+def test_in_set_one_failure_and_a_pass(tmp_path: Path) -> None:
+    assert only(run(tmp_path, in_set("[a]"), b"v\na\nb\n")).summary == (
+        "1 of 2 rows has a value outside the set"
+    )
+    passed = only(run(tmp_path / ".." / tmp_path.name, in_set("[a, b]"), b"v\na\nb\n"))
+    assert (passed.ok, passed.summary) == (True, "every value is in the set")
+
+
+def parquet(tmp_path: Path, values: str, cast: str = "") -> None:
+    rows = ", ".join(f"({value}{cast})" for value in values.split(", "))
+    duckdb.connect(":memory:").execute(
+        f"COPY (SELECT * FROM (VALUES {rows}) t(v)) TO '{tmp_path / 'data.parquet'}' "  # noqa: S608 - test data
+        "(FORMAT parquet)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("values", "cast", "members", "failing"),
+    [
+        (
+            "1, 2, NULL, 9007199254740993", "::BIGINT", "[1, 9007199254740992]",
+            ["2", "9007199254740993"],
+        ),
+        ("1, 2, 3", "::INTEGER", "[1.0, 2]", ["3"]),
+        ("18446744073709551615, 1", "::UBIGINT", "[18446744073709551615]", ["1"]),
+        ("1.0, 'nan', 0.1, 'inf'", "::DOUBLE", "[1, 0.1]", ["nan", "inf"]),
+        ("1.0, 'nan'", "::FLOAT", "[1]", ["nan"]),
+        ("1.50, 2.25", "::DECIMAL(10,2)", "[1.5]", ["2.25"]),
+        ("true, false, NULL", "", "[true]", ["false"]),
+        ("'a', 'A', '', NULL", "", "[a, '']", ["A"]),
+        ("'1', '1.0', 'x'", "", "[1]", ["x"]),
+    ],
+    ids=["bigint-exact", "int-with-decimal-set", "ubigint", "double-nan-inf", "float-nan",
+         "decimal", "boolean", "varchar-text", "varchar-numbers"],
+)  # fmt: skip
+def test_in_set_on_parquet_types(
+    tmp_path: Path, values: str, cast: str, members: str, failing: list[str]
+) -> None:
+    parquet(tmp_path, values, cast)
+    result = only(run(tmp_path, in_set(members), name="data.parquet"))
+    assert failing_values(result) == failing
+
+
+@pytest.mark.parametrize(
+    ("values", "cast", "members", "problem"),
+    [
+        (
+            "1, 2", "::INTEGER", "['1']",
+            "column 'v' holds numbers (INTEGER), but the values are text; write them as "
+            "numbers, without quotes",
+        ),
+        (
+            "1.5", "::DOUBLE", "[true]",
+            "column 'v' holds numbers (DOUBLE), but the values are booleans; write them as "
+            "numbers, without quotes",
+        ),
+        (
+            "true", "", "['true']",
+            "column 'v' holds booleans (BOOLEAN), but the values are text; write true or false",
+        ),
+        ("true", "", "[1]", "column 'v' holds booleans (BOOLEAN), but the values are numbers; "
+         "write true or false"),
+        (
+            "DATE '2024-01-01'", "", "['2024-01-01']",
+            "in_set does not support DATE columns (column 'v')",
+        ),
+        ("[7]", "", "['[7]']", "in_set does not support INTEGER[] columns (column 'v')"),
+    ],
+    ids=["text-on-integer", "boolean-on-double", "text-on-boolean", "number-on-boolean",
+         "date", "list"],
+)  # fmt: skip
+def test_a_set_that_does_not_fit_the_column_type_is_exit_2(
+    tmp_path: Path, values: str, cast: str, members: str, problem: str
+) -> None:
+    parquet(tmp_path, values, cast)
+    with pytest.raises(DataError) as excinfo:
+        run(tmp_path, in_set(members), name="data.parquet")
+    assert excinfo.value.lines() == [
+        "error: a check cannot run on 'data.parquet'",
+        f"  check 1 ({'in_set'}): {problem}",
+    ]
+
+
+def test_type_problems_and_missing_columns_are_listed_together(tmp_path: Path) -> None:
+    parquet(tmp_path, "1, 2", "::INTEGER")
+    checks = in_set("['1']") + "  - {rule: not_null, column: w}\n"
+    with pytest.raises(DataError) as excinfo:
+        run(tmp_path, checks, name="data.parquet")
+    assert excinfo.value.lines() == [
+        "error: 2 checks cannot run on 'data.parquet'",
+        "  check 1 (in_set): column 'v' holds numbers (INTEGER), but the values are text; "
+        "write them as numbers, without quotes",
+        "  check 2 (not_null): no column 'w'",
+        "  the file has 1 column: 'v'",
+    ]

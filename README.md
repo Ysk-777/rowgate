@@ -78,6 +78,34 @@ not refer to the list or mapping that contains it.
 Every rule except `not_null` ignores NULL values. An empty text (`""` in a
 CSV file) is a value, not NULL, so it is checked like any other value.
 
+### in_set
+
+The values in the rules file are all text, all numbers or all booleans (see
+[Writing values in the rules file](#writing-values-in-the-rules-file)), and
+that decides how a value in the data is compared:
+
+| Set of | Text value (CSV, or a Parquet text column) | Parquet column of another type |
+| ------ | ------------------------------------------- | ------------------------------ |
+| text, `[new, paid]` | exact text, case-sensitive: `New` is not `new`, `1.0` is not `'1'` | exit 2 |
+| numbers, `[1, 2.5]` | the value must be a plain number equal to one in the set | integer, decimal or float columns only, else exit 2 |
+| booleans, `[true]` | only the lowercase text `true` or `false` matches | boolean columns only, else exit 2 |
+
+- With a set of numbers, a text value counts if it is a plain number (see
+  [CSV files](#csv-files)) and equals a number in the set: `1`, `01`, `+1`,
+  `1.0`, `1.` and `1e0` all match `1`. `" 1"` does not (spaces make it text),
+  and neither do `NaN` or `inf`.
+- Whole numbers are compared exactly: `9007199254740993` does not match
+  `9007199254740992`, which it would as floating point. Values with a decimal
+  point or exponent, and decimal and float columns, are compared as 64-bit
+  floating point. NaN and infinity are never in a set.
+- With a set of booleans, `TRUE`, `True`, `1`, `yes` and `t` fail. To accept
+  other spellings, use a set of text: `['TRUE', 'FALSE']`.
+- An empty text is a value: put `''` in the set to accept it.
+- `in_set` does not run on Parquet date, timestamp, list or other columns
+  (exit 2).
+- Whole numbers in the rules file may have up to 39 digits (the range of
+  DuckDB's HUGEINT); a larger one is a rules error.
+
 ### regex
 
 The pattern must match the **whole** value, as if it were wrapped in `^` and

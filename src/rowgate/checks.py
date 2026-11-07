@@ -98,7 +98,7 @@ class Report:
         return 1 if self.count("failed") else 0
 
 
-NOT_AVAILABLE_YET = (InSet, Range)
+NOT_AVAILABLE_YET = (Range,)
 
 
 def run_checks(
@@ -308,7 +308,13 @@ def _row_result(
 ) -> CheckResult:
     of_rows = f"{failing} of {_plural(dataset.row_count, 'row')}"
     one = failing == 1
-    if isinstance(check, Regex):
+    if isinstance(check, InSet):
+        summary = (
+            f"{of_rows} {'has' if one else 'have'} a value outside the set"
+            if failing
+            else "every value is in the set"
+        )
+    elif isinstance(check, Regex):
         summary = (
             f"{of_rows} {'does' if one else 'do'} not match the pattern"
             if failing

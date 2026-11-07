@@ -12,6 +12,9 @@ from __future__ import annotations
 # separators (1_000, 1,000), hex, NaN and infinity do not count as numbers.
 NUMBER_PATTERN = r"[-+]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][-+]?[0-9]+)?"
 
+# A whole number written the plain way: 12, -3, +007. Compared exactly, as HUGEINT.
+INTEGER_PATTERN = r"[-+]?[0-9]+"
+
 # Only an ISO date counts as a date: four-digit year, two-digit month and day.
 # 01/02/2024 is never guessed to be a date, and 2024-02-30 is not a real one.
 DATE_PATTERN = r"[0-9]{4}-[0-9]{2}-[0-9]{2}"
@@ -27,6 +30,18 @@ def text_as_number(expression: str) -> str:
     return (
         f"CASE WHEN regexp_full_match({expression}, '{NUMBER_PATTERN}') "
         f"THEN TRY_CAST({expression} AS DOUBLE) END"
+    )
+
+
+def text_as_integer(expression: str) -> str:
+    """SQL that turns a plain whole number into a HUGEINT, or NULL.
+
+    NULL also for whole numbers too large for a HUGEINT (over 38 digits);
+    those are compared as DOUBLE instead.
+    """
+    return (
+        f"CASE WHEN regexp_full_match({expression}, '{INTEGER_PATTERN}') "
+        f"THEN TRY_CAST({expression} AS HUGEINT) END"
     )
 
 

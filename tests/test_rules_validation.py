@@ -993,3 +993,23 @@ def test_glob_characters_in_the_source_path_are_refused(
 def test_other_punctuation_in_the_source_path_is_fine(tmp_path: Path, path: str) -> None:
     text = rules_text("{rule: unique, column: id}", source=f"{{path: '{path}'}}")
     assert load(tmp_path, text).source.path == path
+
+
+@pytest.mark.parametrize("number", [2**127, -(2**127) - 1, 10**50])
+def test_whole_numbers_past_hugeint_are_refused(tmp_path: Path, number: int) -> None:
+    text = rules_text(f"{{rule: in_set, column: v, values: [{number}]}}")
+    [problem] = problems(tmp_path, text)
+    where, message = split_problem(problem)
+    assert where == "check 1 (in_set), field 'values', item 1"
+    assert message == (
+        "whole numbers must be between -2^127 and 2^127 - 1 (up to 39 digits), "
+        f"got a {len(str(abs(number)))}-digit number"
+    )
+
+
+def test_whole_numbers_up_to_hugeint_are_fine(tmp_path: Path) -> None:
+    edges = f"[{2**127 - 1}, {-(2**127)}]"
+    rules = load(tmp_path, rules_text(f"{{rule: in_set, column: v, values: {edges}}}"))
+    [check] = rules.checks
+    assert isinstance(check, InSet)
+    assert check.values == [2**127 - 1, -(2**127)]

@@ -41,6 +41,9 @@ GLOB_CHARACTERS = ("*", "?", "[")
 _URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _MAX_SHOWN = 40
+# Whole numbers are compared exactly as DuckDB HUGEINT values.
+HUGEINT_MIN = -(2**127)
+HUGEINT_MAX = 2**127 - 1
 
 
 def describe_value(value: object) -> str:
@@ -199,8 +202,19 @@ class Unique(_Check):
     column: ColumnName
 
 
+def _whole_number(value: int) -> int:
+    if isinstance(value, bool) or HUGEINT_MIN <= value <= HUGEINT_MAX:
+        return value
+    raise ValueError(
+        "whole numbers must be between -2^127 and 2^127 - 1 (up to 39 digits), "
+        f"got a {len(str(abs(value)))}-digit number"
+    )
+
+
 def _in_set_value(value: object) -> InSetValue:
-    if isinstance(value, str | bool | int):
+    if isinstance(value, int):
+        return _whole_number(value)
+    if isinstance(value, str):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
