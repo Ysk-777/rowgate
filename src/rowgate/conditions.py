@@ -7,11 +7,23 @@ parameters. No value from the rules file is written into SQL text.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from datetime import date
+from decimal import Decimal
 from typing import Literal
 
-from rowgate.rules import InSet, NotNull, Range, Regex
-from rowgate.sql import quote_identifier, text_as_date, text_as_integer, text_as_number
+from rowgate import numbers
+from rowgate.rules import HUGEINT_MAX, HUGEINT_MIN, InSet, NotNull, Range, Regex
+from rowgate.sql import (
+    NUMBER_PATTERN,
+    number_compare,
+    number_key,
+    quote_identifier,
+    text_as_date,
+    text_as_integer,
+    text_as_number,
+)
 
 Family = Literal["text", "integer", "decimal", "float", "boolean", "date", "timestamp", "other"]
 RowRule = NotNull | InSet | Range | Regex
@@ -31,6 +43,8 @@ INTEGER_TYPES = frozenset(
     }
 )
 NUMERIC: tuple[Family, ...] = ("integer", "decimal", "float")
+_FLOAT_TYPES = {"FLOAT": "DOUBLE", "DOUBLE": "DOUBLE"}  # fixed SQL text for each type
+_DECIMAL_TYPE = re.compile(r"DECIMAL\(([0-9]+),([0-9]+)\)")
 _KIND_WORDS = {"text": "text", "number": "numbers", "boolean": "booleans"}
 
 
@@ -186,14 +200,14 @@ def row_test(index: int, check: RowRule, column_type: str, scan: Scan) -> RowTes
             {name: check.pattern},
         )
     if isinstance(check, InSet):
-        passes, params = _in_set(check, column, family, prefix, scan)
+        passes, params = _in_set(check, column, column_type, family, prefix, scan)
     else:
-        passes, params = _in_range(check, column, family, prefix, scan)
+        passes, params = _in_range(check, column, column_type, family, prefix, scan)
     return RowTest(f"{column} IS NOT NULL AND NOT coalesce({passes}, false)", shown, params)
 
 
 def _in_set(
-    check: InSet, column: str, family: Family, prefix: str, scan: Scan
+    check: InSet, column: str, column_type: str, family: Family, prefix: str, scan: Scan
 ) -> tuple[str, dict[str, object]]:
     # Membership is written as "value IN (SELECT unnest($set))", which DuckDB
     # runs as a hash join. list_contains compares each row with every member:
@@ -208,70 +222,167 @@ def _in_set(
         # In text, only the lowercase words true and false are booleans.
         words = sorted({"true" if value else "false" for value in check.values})
         return f"{column} IN (SELECT unnest(${name}))", {name: words}
-    return _in_number_set(check, column, family, prefix, scan)
+    return _in_number_set(check, column, column_type, family, prefix, scan)
 
 
 def _in_number_set(
-    check: InSet, column: str, family: Family, prefix: str, scan: Scan
+    check: InSet, column: str, column_type: str, family: Family, prefix: str, scan: Scan
 ) -> tuple[str, dict[str, object]]:
-    ints = [value for value in check.values if isinstance(value, int)]
-    floats = [float(value) for value in check.values if isinstance(value, float)]
-    params: dict[str, object] = {}
-    if family in ("decimal", "float"):
-        params[f"{prefix}numbers"] = [float(value) for value in check.values]
-        return f"CAST({column} AS DOUBLE) IN (SELECT unnest(${prefix}numbers))", params
-    whole = scan.value(text_as_integer(column)) if family == "text" else column
-    # A whole number is compared exactly with whole numbers in the set, and as
-    # a DOUBLE with the decimal ones.
-    exact: list[str] = []
-    if ints:
-        params[f"{prefix}ints"] = ints
-        exact.append(f"({whole}) IN (SELECT unnest(${prefix}ints))")
-    if floats:
-        params[f"{prefix}floats"] = floats
-        exact.append(f"CAST({whole} AS DOUBLE) IN (SELECT unnest(${prefix}floats))")
-    whole_match = " OR ".join(exact)
+    name = f"{prefix}values"
+    members = [value for value in check.values if not isinstance(value, bool | str)]
+    if family == "float":
+        # Members too large for a DOUBLE would be infinity, which is never in a set.
+        texts = [str(value) for value in members]
+        sql_type = _FLOAT_TYPES[column_type]
+        return (
+            f"{column} IN (SELECT member FROM (SELECT CAST(unnest(${name}) AS {sql_type}) "  # noqa: S608
+            "AS member) WHERE isfinite(member))",
+            {name: texts},
+        )
+    if family == "decimal":
+        precision, scale = _decimal_type(column_type)
+        # Only members with at most `scale` decimals that fit the type can be equal.
+        exact = [numbers.scaled_exact(value, scale) for value in members]
+        texts = [
+            numbers.at_scale(unscaled, scale)
+            for unscaled in exact
+            if unscaled is not None and abs(unscaled) < 10**precision
+        ]
+        if not texts:
+            return "false", {}
+        return (
+            f"{column} IN (SELECT CAST(unnest(${name}) AS DECIMAL({precision}, {scale})))",
+            {name: texts},
+        )
+    ints = _whole_members(members)
+    whole_match = f"{{whole}} IN (SELECT unnest(${name}))" if ints else "false"
+    params: dict[str, object] = {name: ints} if ints else {}
     if family == "integer":
-        return whole_match, params
-    # Text: 01 is the whole number 1; 1.0 and 1e0 are compared as DOUBLE.
-    params[f"{prefix}numbers"] = [float(value) for value in check.values]
-    number = scan.value(text_as_number(column))
+        return whole_match.format(whole=column), params
+    # Text: a plain whole number is compared as a HUGEINT; any other plain
+    # number (1.0, 1e0, 0.30000000000000004, or more than 38 digits) by its
+    # exact digits. Both are exact: 01 is 1, and 1000000000000000.01 is not
+    # 1000000000000000.
+    whole = scan.value(text_as_integer(column))
+    keys = f"{prefix}keys"
+    params[keys] = [numbers.parts(value).key for value in members]
     return (
-        f"CASE WHEN {whole} IS NOT NULL THEN {whole_match} "
-        f"ELSE ({number}) IN (SELECT unnest(${prefix}numbers)) END",
+        f"CASE WHEN {whole} IS NOT NULL THEN {whole_match.format(whole=whole)} "
+        f"ELSE regexp_full_match({column}, '{NUMBER_PATTERN}') "
+        f"AND {number_key(column)} IN (SELECT unnest(${keys})) END",
         params,
     )
 
 
+def _whole_members(members: list[int | Decimal]) -> list[int]:
+    """The members that are whole numbers within HUGEINT, the range of integer columns."""
+    whole = [numbers.scaled_exact(value, 0) for value in members]
+    return [value for value in whole if value is not None and HUGEINT_MIN <= value <= HUGEINT_MAX]
+
+
+def _decimal_type(column_type: str) -> tuple[int, int]:
+    match = _DECIMAL_TYPE.fullmatch(column_type)
+    if match is None:
+        raise AssertionError(f"unexpected decimal type {column_type!r}")
+    return int(match[1]), int(match[2])
+
+
 def _in_range(
-    check: Range, column: str, family: Family, prefix: str, scan: Scan
+    check: Range, column: str, column_type: str, family: Family, prefix: str, scan: Scan
 ) -> tuple[str, dict[str, object]]:
     params: dict[str, object] = {}
     parts: list[str] = []
-    bounds = [(check.min, ">=", f"{prefix}min"), (check.max, "<=", f"{prefix}max")]
-    if family == "text" and check.kind == "number":
-        number = scan.value(text_as_number(column))
-        whole = scan.value(text_as_integer(column))
-        parts.append(f"isfinite({number})")  # nan, inf and 1e400 fail
-        for bound, op, name in bounds:
-            if bound is None:
-                continue
+    if check.kind == "date":
+        value = column
+        if family == "text":  # dates written as text
+            value = scan.value(text_as_date(column))
+            parts.append(f"{value} IS NOT NULL")
+        for bound, op, name in _bounds(check, prefix):
             params[name] = bound
-            if isinstance(bound, int):
-                # Whole numbers exactly, as HUGEINT; anything else as DOUBLE.
-                parts.append(f"coalesce({whole} {op} ${name}, {number} {op} ${name})")
-            else:
-                parts.append(f"{number} {op} ${name}")
+            parts.append(f"{value} {op} ${name}")
         return " AND ".join(parts), params
-    value = column
-    if family == "text":  # dates written as text
-        value = scan.value(text_as_date(column))
-        parts.append(f"{value} IS NOT NULL")
-    elif family == "float":
-        parts.append(f"isfinite({column})")  # NaN and infinity fail
-    for bound, op, name in bounds:
-        if bound is None:
-            continue
-        params[name] = bound
-        parts.append(f"{value} {op} ${name}")
+    if family == "float":
+        # NaN and infinity fail; DuckDB orders NaN above every number.
+        sql_type = _FLOAT_TYPES[column_type]
+        parts.append(f"isfinite({column})")
+        for bound, op, name in _number_bounds(check, prefix):
+            params[name] = str(bound)
+            parts.append(f"{column} {op} CAST(${name} AS {sql_type})")
+        return " AND ".join(parts), params
+    if family in ("integer", "decimal"):
+        precision, scale = _decimal_type(column_type) if family == "decimal" else (0, 0)
+        for bound, op, name in _number_bounds(check, prefix):
+            parts.append(_exact_bound(column, bound, op, name, precision, scale, params))
+        return " AND ".join(parts), params
+    # Text: the number must be plain and finite as a DOUBLE (nan, inf and 1e400
+    # fail). It is compared as a DOUBLE where that settles the question, and
+    # by its exact digits where its DOUBLE is next to the bound's.
+    number = scan.value(text_as_number(column))
+    parts.append(f"isfinite({number})")
+    for bound, op, name in _number_bounds(check, prefix):
+        below, above = numbers.neighbours(bound)
+        bound_parts = numbers.parts(bound)
+        params |= {
+            f"{name}_below": below,
+            f"{name}_above": above,
+            f"{name}_sign": bound_parts.sign,
+            f"{name}_digits": bound_parts.digits,
+            f"{name}_exponent": bound_parts.exponent,
+        }
+        exact = number_compare(column, f"{name}_sign", f"{name}_digits", f"{name}_exponent")
+        parts.append(
+            f"(CASE WHEN {number} < ${name}_below THEN -1 WHEN {number} > ${name}_above THEN 1 "
+            f"ELSE {exact} END) {op} 0"
+        )
     return " AND ".join(parts), params
+
+
+def _bounds(check: Range, prefix: str) -> list[tuple[int | Decimal | date, str, str]]:
+    bounds = [(check.min, ">=", f"{prefix}min"), (check.max, "<=", f"{prefix}max")]
+    return [(bound, op, name) for bound, op, name in bounds if bound is not None]
+
+
+def _number_bounds(check: Range, prefix: str) -> list[tuple[int | Decimal, str, str]]:
+    found: list[tuple[int | Decimal, str, str]] = []
+    for bound, op, name in _bounds(check, prefix):
+        if isinstance(bound, date):  # only possible if validation was bypassed
+            raise AssertionError("a date bound in a range of numbers")
+        found.append((bound, op, name))
+    return found
+
+
+def _exact_bound(
+    column: str,
+    bound: int | Decimal,
+    op: str,
+    name: str,
+    precision: int,
+    scale: int,
+    params: dict[str, object],
+) -> str:
+    """``column op bound`` for an integer column (precision 0) or DECIMAL(precision, scale).
+
+    The column's values are whole multiples of 10^-scale, so value <= bound
+    exactly when value <= floor(bound) at that scale (and >= with ceil). That
+    bound is exact in the column's type, unless it lies outside the type's
+    range, where the answer is the same for every value.
+    """
+    if op == "<=":
+        rounded = numbers.scaled_floor(bound, scale)
+    else:
+        rounded = numbers.scaled_ceil(bound, scale)
+    # Integer columns from Parquet have at most 64 bits; HUGEINT holds them all.
+    low, high = (HUGEINT_MIN, HUGEINT_MAX)
+    if precision:
+        low, high = -(10**precision) + 1, 10**precision - 1
+    if rounded is None:  # more than 40 digits: far outside the type
+        rounded = high + 1 if bound > 0 else low - 1
+    if rounded > high:
+        return "true" if op == "<=" else "false"
+    if rounded < low:
+        return "false" if op == "<=" else "true"
+    if precision:
+        params[name] = numbers.at_scale(rounded, scale)
+        return f"{column} {op} CAST(${name} AS DECIMAL({precision}, {scale}))"
+    params[name] = rounded
+    return f"{column} {op} ${name}"

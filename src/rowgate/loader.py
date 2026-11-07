@@ -8,6 +8,7 @@ import types
 import typing
 from collections.abc import Iterator
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +65,7 @@ class AmbiguousScalar:
                 f"unquoted {self.text} is read by YAML as the boolean {word}; write true or "
                 f"false for a boolean, or {quoted} {where}"
             )
-        if isinstance(self.meaning, int | float):
+        if isinstance(self.meaning, int | Decimal):
             return (
                 f"unquoted {self.text} is read by YAML as the number {self.meaning}; write "
                 f"{self.meaning} if you mean that number, or {quoted} {where}"
@@ -193,8 +194,34 @@ def _construct_mapping(loader: _RulesLoader, node: yaml.MappingNode) -> Iterator
     data.update(loader.construct_mapping(node))
 
 
+def _construct_decimal(loader: _RulesLoader, node: yaml.ScalarNode) -> Decimal:
+    """Read a YAML float as an exact Decimal: 0.1 is one tenth, not the float nearest to it.
+
+    Bounds such as 12345678.12345678901 keep every digit, so data can be
+    compared with them exactly.
+    """
+    text = loader.construct_scalar(node).replace("_", "")
+    special = _SPECIAL_FLOATS.get(text.lower())
+    if special is not None:
+        return Decimal(special)
+    if ":" in text:  # base 60, only with an explicit !!float tag; PyYAML reads it
+        return Decimal(repr(loader.construct_yaml_float(node)))
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        raise ValueError("not a number") from None
+
+
+_SPECIAL_FLOATS = {
+    ".inf": "Infinity",
+    "+.inf": "Infinity",
+    "-.inf": "-Infinity",
+    ".nan": "NaN",
+}
+
 _RulesLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
 _RulesLoader.add_constructor(_AMBIGUOUS_TAG, _RulesLoader.construct_ambiguous)
+_RulesLoader.add_constructor(_FLOAT_TAG, _construct_decimal)
 
 
 def read_rules_text(path: Path) -> str:

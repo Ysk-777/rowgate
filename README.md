@@ -97,17 +97,24 @@ that decides how a value in the data is compared:
   [CSV files](#csv-files)) and equals a number in the set: `1`, `01`, `+1`,
   `1.0`, `1.` and `1e0` all match `1`. `" 1"` does not (spaces make it text),
   and neither do `NaN` or `inf`.
-- Whole numbers are compared exactly: `9007199254740993` does not match
-  `9007199254740992`, which it would as floating point. Values with a decimal
-  point or exponent, and decimal and float columns, are compared as 64-bit
-  floating point. NaN and infinity are never in a set.
+- Numbers are compared exactly, digit by digit: `9007199254740993` is not
+  `9007199254740992`, `1000000000000000.01` is not `1000000000000000`, and
+  `0.30000000000000004` is not `0.3`, though each pair is one number as
+  64-bit floating point. There is no limit on the number of digits (see
+  [Exact numbers](#exact-numbers)).
+- On Parquet columns: an integer column matches only whole members; a
+  decimal column, such as `DECIMAL(18,2)`, matches only members it can hold
+  exactly (`0.005` never matches); a `FLOAT` or `DOUBLE` column is compared
+  as `DOUBLE`, with each member turned into the nearest `DOUBLE`. NaN and
+  infinity are never in a set.
 - With a set of booleans, `TRUE`, `True`, `1`, `yes` and `t` fail. To accept
   other spellings, use a set of text: `['TRUE', 'FALSE']`.
 - An empty text is a value: put `''` in the set to accept it.
 - `in_set` does not run on Parquet date, timestamp, list or other columns
   (exit 2).
 - Whole numbers in the rules file may have up to 39 digits (the range of
-  DuckDB's HUGEINT); a larger one is a rules error.
+  DuckDB's HUGEINT); a larger one is a rules error. Numbers with a decimal
+  point may have any number of digits.
 
 ### range
 
@@ -119,19 +126,52 @@ numbers or both dates (`2024-01-31`, quoted or not), and the column must fit:
 | numbers | must be a plain, finite number within the bounds | integer, decimal or float; a date column is exit 2 |
 | dates | must be a real ISO date (`YYYY-MM-DD`) within the bounds | date; a number column is exit 2 |
 
-- Whole numbers are compared exactly with whole-number bounds, as DuckDB
-  `HUGEINT`: `9007199254740993` fails `max: 9007199254740992`, which it would
-  pass as floating point. A whole number of more than 38 digits, a value with
-  a decimal point or exponent, a decimal bound such as `0.5`, and decimal and
-  float columns are compared as 64-bit floating point.
+- Text values and the bounds are compared exactly, digit by digit:
+  `9007199254740993` fails `max: 9007199254740992`, `1000000000000000.01`
+  fails `max: 1000000000000000`, `12345678.123456789012` fails
+  `max: 12345678.12345678901`, and `0.30000000000000004` fails `max: 0.3`,
+  though each would pass as 64-bit floating point. There is no limit on the
+  number of digits (see [Exact numbers](#exact-numbers)).
 - In text, anything that is not a plain number is a failing row: `nan`,
   `inf`, `Infinity`, `" 5"`, `1_000`, `abc`, and the empty text. So is a
   number too large for a 64-bit float, such as `1e400`: it would be infinity.
+- Parquet integer and decimal columns are compared exactly too: an integer
+  column against `max: 2.5` passes 2 and fails 3, and a `DECIMAL(18,2)`
+  value `1000000000000000.01` fails `max: 1000000000000000.005`.
+- `FLOAT` and `DOUBLE` columns are compared as `DOUBLE`: the bound is turned
+  into the nearest `DOUBLE`, so a `DOUBLE` value stored as `0.1` passes
+  `max: 0.1`. A bound too large for a `DOUBLE` becomes infinity.
 - In a float column, NaN and infinity are failing rows for any range. (DuckDB
   orders NaN above every number, so on its own it would pass a range that has
   only a `min`.)
 - Timestamp columns are not supported yet (exit 2); see the
   [roadmap](ROADMAP.md). Boolean, time, list and other columns are exit 2.
+
+### Exact numbers
+
+RowGate never rounds a number before comparing it, in `in_set` or `range`:
+
+- Numbers in the rules file keep every digit you write: `0.1` is one tenth,
+  not the 64-bit float nearest to it, and `12345678.12345678901` keeps all
+  19 digits.
+- A text value is compared with each bound as a 64-bit float first, which
+  settles almost every value at full speed. Only a value whose float is next
+  to the bound's (within one step) is then compared digit by digit, as sign,
+  digits and exponent. For `in_set`, a whole number is compared as a
+  `HUGEINT`, and any other number by its digits.
+- So there is no limit at 38 significant digits, the most a DuckDB
+  `DECIMAL` holds: a value with 60 digits is compared exactly with a bound
+  with 50. (A fixed `DECIMAL(38,12)` would not do: it rounds
+  `0.30000000000000004` to `0.3`.)
+- The one limit is the exponent: a text value whose exponent does not fit a
+  64-bit integer (more than 18 digits, as in `1e-99999999999999999999`) is a
+  failing row when it is next to a bound of the same sign, because only the
+  exponent could decide. Python's `Decimal`, which reads the rules file,
+  refuses such exponents in the rules file itself.
+- Parquet integer and decimal columns hold exact values, and the bound is
+  rounded to the column's scale in the safe direction (down for `max`, up for
+  `min`), so the comparison is exact. A bound outside the column type's range
+  passes or fails every value, as it should.
 
 ### regex
 

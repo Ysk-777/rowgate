@@ -6,9 +6,9 @@ accepted where a number is expected, and ``true`` is not accepted as ``1``.
 
 from __future__ import annotations
 
-import math
 import re
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import PurePath
 from typing import Annotated, Literal, Self
 
@@ -29,8 +29,10 @@ FileFormat = Literal["csv", "parquet"]
 ValueKind = Literal["text", "number", "boolean"]
 BoundKind = Literal["number", "date"]
 
-InSetValue = str | bool | int | float
-RangeBound = int | float | date
+# Numbers with a decimal point are Decimals (see loader._construct_decimal),
+# so they keep every digit written in the rules file.
+InSetValue = str | bool | int | Decimal
+RangeBound = int | Decimal | date
 
 FORMAT_BY_EXTENSION: dict[str, FileFormat] = {".csv": "csv", ".parquet": "parquet"}
 
@@ -54,7 +56,11 @@ def describe_value(value: object) -> str:
         return f"boolean {'true' if value else 'false'}"
     if isinstance(value, int):
         return f"integer {value}"
-    if isinstance(value, float):
+    if isinstance(value, Decimal):
+        if value.is_nan():
+            return "number nan"
+        if value.is_infinite():
+            return f"number {'-' if value < 0 else ''}inf"
         return f"number {value}"
     if isinstance(value, str):
         shown = value if len(value) <= _MAX_SHOWN else value[: _MAX_SHOWN - 3] + "..."
@@ -211,15 +217,19 @@ def _whole_number(value: int) -> int:
     )
 
 
+def _decimal_number(value: Decimal) -> Decimal:
+    if not value.is_finite():
+        raise ValueError(f"must be a finite number, got {describe_value(value)}")
+    return value
+
+
 def _in_set_value(value: object) -> InSetValue:
     if isinstance(value, int):
         return _whole_number(value)
     if isinstance(value, str):
         return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError(f"must be a finite number, got {describe_value(value)}")
-        return value
+    if isinstance(value, Decimal):
+        return _decimal_number(value)
     if value is None:
         raise ValueError("null is not allowed; in_set always ignores NULL values")
     if isinstance(value, date):
@@ -270,10 +280,8 @@ def _range_bound(value: object) -> RangeBound:
         raise ValueError(f"expected a number or a date, got {describe_value(value)}")
     if isinstance(value, int):
         return _whole_number(value)
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError(f"must be a finite number, got {describe_value(value)}")
-        return value
+    if isinstance(value, Decimal):
+        return _decimal_number(value)
     if isinstance(value, datetime):
         raise ValueError(
             f"timestamps are not supported; use a date such as {value.date().isoformat()}"
@@ -370,6 +378,6 @@ class RulesFile(_StrictModel):
     @classmethod
     def _exactly_the_integer_one(cls, value: object) -> object:
         # Literal[1] alone accepts true and 1.0, because True == 1.0 == 1 in Python.
-        if isinstance(value, bool | float):
+        if isinstance(value, bool | Decimal):
             raise ValueError(f"unsupported version; expected 1, got {describe_value(value)}")
         return value

@@ -6,7 +6,6 @@ from pathlib import Path
 
 import duckdb
 import pytest
-import yaml
 
 from rowgate.checks import (
     CheckResult,
@@ -20,7 +19,7 @@ from rowgate.checks import (
 )
 from rowgate.conditions import Scan, row_test, type_family
 from rowgate.errors import DataError
-from rowgate.loader import load_rules
+from rowgate.loader import load_rules, parse_rules_yaml
 from rowgate.rules import InSet, NotNull, Range, Regex
 from rowgate.source import open_dataset
 from rowgate.sql import text_as_number
@@ -924,7 +923,9 @@ def test_a_large_set_is_matched_with_a_hash_join(tmp_path: Path) -> None:
 
 
 def load_values(flow: str) -> list[object]:
-    values = yaml.safe_load(flow)
+    loaded = parse_rules_yaml(f"values: {flow}\n", "test")  # numbers as RowGate reads them
+    assert isinstance(loaded, dict)
+    values = loaded["values"]
     assert isinstance(values, list)
     return values
 
