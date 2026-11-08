@@ -11,11 +11,15 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Youssef Kedidi" }]
 requires-python = ">=3.11"
-keywords = ["data-quality", "csv", "parquet", "duckdb", "validation", "cli"]
+keywords = [
+    "data-quality", "data-validation", "csv", "parquet", "duckdb", "yaml", "ci", "cli",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
@@ -45,8 +49,17 @@ dev = [
     "types-PyYAML>=6.0.12.20261103",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Ysk-777/rowgate"
+Issues = "https://github.com/Ysk-777/rowgate/issues"
+Changelog = "https://github.com/Ysk-777/rowgate/blob/main/CHANGELOG.md"
+
 [project.scripts]
 rowgate = "rowgate.cli:main"
+
+[tool.flit.sdist]
+# The source archive also holds what is needed to run the tests and examples.
+include = ["CHANGELOG.md", "CONTRIBUTING.md", "ROADMAP.md", "examples/", "tests/"]
 
 [tool.ruff]
 line-length = 100
