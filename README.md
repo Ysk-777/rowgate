@@ -535,9 +535,10 @@ that decides how a value in the data is compared:
 - An empty text is a value: put `''` in the set to accept it.
 - `in_set` does not run on Parquet date, timestamp, list or other columns
   (exit 2).
-- Whole numbers in the rules file may have up to 39 digits (the range of
-  DuckDB's HUGEINT); a larger one is a rules error. Numbers with a decimal
-  point may have any number of digits.
+- Numbers in the rules file may have any number of digits, whole or not.
+  A whole number means exactly the same as that number written with `.0`:
+  `[100000000000000000000000000000000000000000]` and
+  `[100000000000000000000000000000000000000000.0]` are the same set.
 
 ### range
 
@@ -593,13 +594,17 @@ RowGate never rounds a number before comparing it, in `in_set` or `range`:
 
 - Numbers in the rules file keep every digit you write: `0.1` is one tenth,
   not the 64-bit float nearest to it, and `12345678.12345678901` keeps all
-  19 digits.
+  19 digits. Whole numbers of any size are kept exactly too, beyond the 39
+  digits of DuckDB's largest integer type, and `12` means exactly the same as
+  `12.0`. (Python reads at most 4,300 digits into a whole number; a longer
+  one is read as the same number with `.0`.)
 - A text value is compared with each bound as a 64-bit float first, which
   settles almost every value at full speed. A value whose float is next to
   the bound's (within one step) is settled by its text if it is written
   exactly like the bound (`100` for `max: 100`), and otherwise compared digit
-  by digit, as sign, digits and exponent. For `in_set`, a whole number is
-  compared as a `HUGEINT`, and any other number by its digits.
+  by digit, as sign, digits and exponent. For `in_set`, a whole number from
+  -2^127 to 2^127 - 1 (DuckDB's `HUGEINT`) is compared as a `HUGEINT`,
+  which is faster, and any other number by its digits.
 - So there is no limit at 38 significant digits, the most a DuckDB
   `DECIMAL` holds: a value with 60 digits is compared exactly with a bound
   with 50. (A fixed `DECIMAL(38,12)` would not do: it rounds

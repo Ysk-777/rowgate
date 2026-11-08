@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import sys
 import types
 import typing
 from collections.abc import Iterator
@@ -213,6 +214,24 @@ def _construct_decimal(loader: _RulesLoader, node: yaml.ScalarNode) -> Decimal:
         raise ValueError("not a number") from None
 
 
+def _construct_int(loader: _RulesLoader, node: yaml.ScalarNode) -> int | Decimal:
+    """Read a YAML int; one too long for Python's int() becomes an exact Decimal.
+
+    Python refuses to turn text of more than sys.get_int_max_str_digits()
+    digits (4,300 by default) into an int. Such a number is read as the
+    whole Decimal it is, exactly as if it were written with ".0", so a whole
+    number of any size is accepted.
+    """
+    text = loader.construct_scalar(node)
+    limit = sys.get_int_max_str_digits()
+    if limit and _LONG_INT.fullmatch(text) and len(text.lstrip("+-")) > limit:
+        return Decimal(text)
+    value: int = loader.construct_yaml_int(node)
+    return value
+
+
+_LONG_INT = re.compile(r"[-+]?[0-9]+")
+
 _SPECIAL_FLOATS = {
     ".inf": "Infinity",
     "+.inf": "Infinity",
@@ -223,6 +242,7 @@ _SPECIAL_FLOATS = {
 _RulesLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
 _RulesLoader.add_constructor(_AMBIGUOUS_TAG, _RulesLoader.construct_ambiguous)
 _RulesLoader.add_constructor(_FLOAT_TAG, _construct_decimal)
+_RulesLoader.add_constructor(_INT_TAG, _construct_int)
 
 
 def read_rules_text(path: str | Path) -> str:

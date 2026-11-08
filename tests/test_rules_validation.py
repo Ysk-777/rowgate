@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -995,31 +996,29 @@ def test_other_punctuation_in_the_source_path_is_fine(tmp_path: Path, path: str)
     assert load(tmp_path, text).source.path == path
 
 
-@pytest.mark.parametrize("number", [2**127, -(2**127) - 1, 10**50])
-def test_whole_numbers_past_hugeint_are_refused(tmp_path: Path, number: int) -> None:
-    text = rules_text(f"{{rule: in_set, column: v, values: [{number}]}}")
-    [problem] = problems(tmp_path, text)
-    where, message = split_problem(problem)
-    assert where == "check 1 (in_set), field 'values', item 1"
-    assert message == (
-        "whole numbers must be between -2^127 and 2^127 - 1 (up to 39 digits), "
-        f"got a {len(str(abs(number)))}-digit number"
+@pytest.mark.parametrize(
+    "number", [10**39 - 1, 2**127 - 1, 2**127, -(2**127), -(2**127) - 1, 10**50, -(10**60 - 1)]
+)
+def test_whole_numbers_of_any_size_are_kept_exactly(tmp_path: Path, number: int) -> None:
+    text = rules_text(
+        f"{{rule: in_set, column: v, values: [{number}]}}",
+        f"{{rule: range, column: v, max: {number}}}",
     )
+    in_set, in_range = load(tmp_path, text).checks
+    assert isinstance(in_set, InSet)
+    assert isinstance(in_range, Range)
+    assert in_set.values == [number]
+    assert in_range.max == number
 
 
-def test_whole_numbers_up_to_hugeint_are_fine(tmp_path: Path) -> None:
-    edges = f"[{2**127 - 1}, {-(2**127)}]"
-    rules = load(tmp_path, rules_text(f"{{rule: in_set, column: v, values: {edges}}}"))
-    [check] = rules.checks
-    assert isinstance(check, InSet)
-    assert check.values == [2**127 - 1, -(2**127)]
-
-
-def test_range_bounds_past_hugeint_are_refused(tmp_path: Path) -> None:
-    text = rules_text(f"{{rule: range, column: v, max: {2**127}}}")
-    [problem] = problems(tmp_path, text)
-    assert split_problem(problem) == (
-        "check 1 (range), field 'max'",
-        "whole numbers must be between -2^127 and 2^127 - 1 (up to 39 digits), "
-        "got a 39-digit number",
-    )
+def test_a_whole_number_too_long_for_python_int_is_read_as_an_exact_decimal(
+    tmp_path: Path,
+) -> None:
+    # Python refuses int() of more than 4,300 digits; RowGate reads such a
+    # number as the whole Decimal it is, as if it were written with ".0".
+    digits = "9" * 4400
+    for written in (digits, "-" + digits, digits + ".0"):
+        rules = load(tmp_path, rules_text(f"{{rule: range, column: v, min: {written}}}"))
+        [check] = rules.checks
+        assert isinstance(check, Range)
+        assert check.min == Decimal(written)

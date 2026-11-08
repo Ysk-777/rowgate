@@ -421,3 +421,84 @@ def test_values_written_like_the_bound_and_others_next_to_it(
 ) -> None:
     result = check(tmp_path, f"rule: range, column: v, {bound}", column(*texts))
     assert failing(result) == expected
+
+
+# --- whole numbers of any size in the rules ---------------------------------------------------
+
+BIG = [
+    10**39 - 1,  # 39 nines
+    10**40 - 1,  # 40 nines
+    2**127 - 1,  # the largest HUGEINT
+    2**127,
+    -(2**127) - 1,
+    10**59 + 7,  # 60 digits
+    -(10**60 - 1),  # 60 digits, negative
+]
+
+
+def results_for(tmp_path: Path, data_name: str, written: str) -> list[tuple[int | None, list[int]]]:
+    """Failing rows of range max, range min and in_set with the number written as given."""
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(
+        f"version: 1\nsource: {{path: {data_name}}}\nchecks:\n"
+        f"  - {{rule: range, column: v, max: {written}}}\n"
+        f"  - {{rule: range, column: v, min: {written}}}\n"
+        f"  - {{rule: in_set, column: v, values: [{written}]}}\n",
+        encoding="utf-8",
+    )
+    report = run_checks(load_rules(rules), rules, max_samples=100)
+    return [(r.failing_rows, [s.row for s in r.samples or ()]) for r in report.results]
+
+
+def expected(
+    values: list[object], fits_max: object, fits_min: object, equal: object
+) -> list[tuple[int | None, list[int]]]:
+    found: list[tuple[int | None, list[int]]] = []
+    for passes in (fits_max, fits_min, equal):
+        assert callable(passes)
+        rows = [row for row, value in enumerate(values, 1) if not passes(value)]
+        found.append((len(rows), rows))
+    return found
+
+
+@pytest.mark.parametrize("number", BIG, ids=lambda n: f"{'-' if n < 0 else ''}{len(str(abs(n)))}d")
+def test_a_huge_whole_number_on_text_is_exact_and_the_same_as_with_point_zero(
+    tmp_path: Path, number: int
+) -> None:
+    texts = [str(number - 1), str(number), str(number + 1), f"{number}.0", f"{number}e0",
+             f"{number}.5", "1", "-1"]  # fmt: skip
+    (tmp_path / "data.csv").write_bytes(column(*texts))
+    parquet(tmp_path, "VARCHAR", *(f"'{text}'" for text in texts))
+    want = expected(
+        [Decimal(text) for text in texts],
+        lambda v: v <= number,
+        lambda v: v >= number,
+        lambda v: v == number,
+    )
+    for name in ("data.csv", "data.parquet"):
+        assert results_for(tmp_path, name, str(number)) == want
+        assert results_for(tmp_path, name, f"{number}.0") == want
+
+
+@pytest.mark.parametrize("number", BIG, ids=lambda n: f"{'-' if n < 0 else ''}{len(str(abs(n)))}d")
+@pytest.mark.parametrize(
+    ("sql_type", "values"),
+    [
+        ("DOUBLE", ["1e39", "-1e39", "1.7e38", "1e60", "-1e60", "1"]),
+        ("DECIMAL(38,0)", [str(10**38 - 1), str(-(10**38) + 1), "0"]),
+        ("BIGINT", [str(2**63 - 1), str(-(2**63)), "0"]),
+    ],
+)
+def test_a_huge_whole_number_on_parquet_numbers_is_the_same_as_with_point_zero(
+    tmp_path: Path, number: int, sql_type: str, values: list[str]
+) -> None:
+    parquet(tmp_path, sql_type, *values)
+    if sql_type == "DOUBLE":  # compared in the column's own type
+        bound = float(number)
+        want = expected([float(v) for v in values], lambda v: v <= bound,
+                        lambda v: v >= bound, lambda v: v == bound)  # fmt: skip
+    else:  # exact: the number is outside the type, so it passes or fails every value
+        want = expected([int(v) for v in values], lambda v: v <= number,
+                        lambda v: v >= number, lambda v: v == number)  # fmt: skip
+    assert results_for(tmp_path, "data.parquet", str(number)) == want
+    assert results_for(tmp_path, "data.parquet", f"{number}.0") == want

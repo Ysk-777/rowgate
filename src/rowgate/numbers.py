@@ -61,7 +61,9 @@ def neighbours(value: Number) -> tuple[float, float]:
     and one above the second is certainly above it, even if the data's float
     were rounded one step wrong. Only values in between need an exact look.
     """
-    nearest = float(value)  # correctly rounded; overflows to infinity
+    # Through Decimal, which is correctly rounded and overflows to infinity;
+    # float() of a whole number beyond the float range raises instead.
+    nearest = float(Decimal(value))
     return math.nextafter(nearest, -math.inf), math.nextafter(nearest, math.inf)
 
 

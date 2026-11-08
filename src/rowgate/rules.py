@@ -44,7 +44,8 @@ GLOB_CHARACTERS = ("*", "?", "[")
 _URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _MAX_SHOWN = 40
-# Whole numbers are compared exactly as DuckDB HUGEINT values.
+# The range of DuckDB's HUGEINT. Whole numbers of any size are allowed in the
+# rules; those in this range can also be compared as HUGEINT, which is faster.
 HUGEINT_MIN = -(2**127)
 HUGEINT_MAX = 2**127 - 1
 
@@ -214,15 +215,6 @@ class Unique(_Check):
     column: ColumnName
 
 
-def _whole_number(value: int) -> int:
-    if isinstance(value, bool) or HUGEINT_MIN <= value <= HUGEINT_MAX:
-        return value
-    raise ValueError(
-        "whole numbers must be between -2^127 and 2^127 - 1 (up to 39 digits), "
-        f"got a {len(str(abs(value)))}-digit number"
-    )
-
-
 def _decimal_number(value: Decimal) -> Decimal:
     if not value.is_finite():
         raise ValueError(f"must be a finite number, got {describe_value(value)}")
@@ -230,9 +222,7 @@ def _decimal_number(value: Decimal) -> Decimal:
 
 
 def _in_set_value(value: object) -> InSetValue:
-    if isinstance(value, int):
-        return _whole_number(value)
-    if isinstance(value, str):
+    if isinstance(value, int | str):
         return value
     if isinstance(value, Decimal):
         return _decimal_number(value)
@@ -285,7 +275,7 @@ def _range_bound(value: object) -> RangeBound:
     if isinstance(value, bool):
         raise ValueError(f"expected a number or a date, got {describe_value(value)}")
     if isinstance(value, int):
-        return _whole_number(value)
+        return value
     if isinstance(value, Decimal):
         return _decimal_number(value)
     if isinstance(value, datetime):

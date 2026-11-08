@@ -55,9 +55,17 @@ text_cells = st.one_of(
         max_size=12,
     ),
     st.decimals(allow_nan=False, allow_infinity=False, places=None).map(str),
-    st.integers(-(10**20), 10**20).map(str),
+    st.integers(-(10**80), 10**80).map(str),
 )
 cells = st.one_of(st.none(), text_cells)
+# Whole numbers of any size are allowed in the rules: up to 80 digits here,
+# with the edges of DuckDB's HUGEINT, and written plainly or with ".0".
+HUGEINT_EDGES = [2**127 - 1, 2**127, -(2**127), -(2**127) - 1, 10**39 - 1, 10**40 - 1]
+numbers = st.one_of(
+    st.sampled_from(EDGE_NUMBERS),
+    st.integers(-(10**80), 10**80).map(Decimal),
+    st.sampled_from(HUGEINT_EDGES).map(Decimal),
+)
 
 
 @dataclass(frozen=True)
@@ -74,14 +82,35 @@ class Case:
     number_bounds: tuple[Decimal | None, Decimal | None]
     date_bounds: tuple[date | None, date | None]
     pattern: str
+    point_zero: bool  # write whole numbers in the rules as 12.0 instead of 12
 
 
 @st.composite
 def cases(draw: st.DrawFn) -> Case:
     rows = draw(st.lists(st.lists(cells, min_size=3, max_size=3), max_size=25))
-    low, high = sorted(draw(st.lists(st.sampled_from(EDGE_NUMBERS), min_size=2, max_size=2)))
+    low, high = sorted(draw(st.lists(numbers, min_size=2, max_size=2)))
     first, last = sorted(draw(st.lists(st.sampled_from(EDGE_DATES), min_size=2, max_size=2)))
     keep = draw(st.sampled_from(["both", "min", "max"]))
+    members = draw(st.lists(numbers, min_size=1, max_size=4))
+    # Values next to the bounds and members, so the exact comparison is tested
+    # where it matters, written plainly, with ".0" or with an exponent.
+    for anchor, offset, style in draw(
+        st.lists(
+            st.tuples(
+                st.sampled_from([low, high, *members]),
+                st.sampled_from([-1, 0, 1]),
+                st.sampled_from(["plain", "point", "exponent"]),
+            ),
+            max_size=6,
+        )
+    ):
+        value = anchor + offset
+        text = format(value, "f")
+        if style == "point" and "." not in text:
+            text += ".0"
+        elif style == "exponent":
+            text = f"{value:E}".replace("E+", "e")
+        rows.append([text, None, text])
     return Case(
         rows=rows,
         quote_all=draw(st.booleans()),
@@ -89,12 +118,13 @@ def cases(draw: st.DrawFn) -> Case:
         row_max=draw(st.none() | st.integers(30, 40)),
         set_kind=draw(st.sampled_from(["text", "number", "boolean"])),
         text_members=draw(st.lists(text_cells, min_size=1, max_size=4)),
-        number_members=draw(st.lists(st.sampled_from(EDGE_NUMBERS), min_size=1, max_size=4)),
+        number_members=members,
         boolean_members=draw(st.lists(st.booleans(), min_size=1, max_size=2)),
         range_kind=draw(st.sampled_from(["number", "date"])),
         number_bounds=(low if keep != "max" else None, high if keep != "min" else None),
         date_bounds=(first if keep != "max" else None, last if keep != "min" else None),
         pattern=draw(st.sampled_from(PATTERNS)),
+        point_zero=draw(st.booleans()),
     )
 
 
@@ -128,23 +158,29 @@ def _escape(match: re.Match[str]) -> str:
     return f"\\u{ord(match[0]):04x}"
 
 
-def yaml_number(value: Decimal) -> str:
-    """A YAML number that RowGate reads back as exactly ``value``."""
-    if value == value.to_integral_value() and abs(value) < 10**30:
-        return str(int(value))
-    text = format(value, "f")
-    return text if "." in text else text + ".0"
+def yaml_number(value: Decimal, point_zero: bool) -> str:
+    """A YAML number that RowGate reads back as exactly ``value``, of any size.
+
+    Whole numbers are written as plain integers, or with ".0" if
+    ``point_zero``; both must mean the same.
+    """
+    if value == value.to_integral_value():
+        whole = str(int(value))
+        return whole + ".0" if point_zero else whole
+    return format(value, "f")
 
 
 def rules_text(case: Case) -> str:
     if case.set_kind == "text":
         members = ", ".join(map(yaml_string, case.text_members))
     elif case.set_kind == "number":
-        members = ", ".join(map(yaml_number, case.number_members))
+        members = ", ".join(yaml_number(value, case.point_zero) for value in case.number_members)
     else:
         members = ", ".join("true" if value else "false" for value in case.boolean_members)
     if case.range_kind == "number":
-        low, high = (None if b is None else yaml_number(b) for b in case.number_bounds)
+        low, high = (
+            None if b is None else yaml_number(b, case.point_zero) for b in case.number_bounds
+        )
     else:
         low, high = (None if b is None else b.isoformat() for b in case.date_bounds)
     bounds = ", ".join(f"{key}: {value}" for key, value in (("min", low), ("max", high)) if value)

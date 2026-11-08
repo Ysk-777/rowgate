@@ -37,7 +37,7 @@ def text_as_integer(expression: str) -> str:
     """SQL that turns a plain whole number into a HUGEINT, or NULL.
 
     NULL also for whole numbers too large for a HUGEINT (over 38 digits);
-    those are compared as DOUBLE instead.
+    callers compare those by their digits instead (see number_parts).
     """
     return (
         f"CASE WHEN regexp_full_match({expression}, '{INTEGER_PATTERN}') "
