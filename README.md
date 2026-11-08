@@ -480,6 +480,23 @@ in the scans that collect samples, `file_row_number := true`.
   the columns the file does have. `columns_exist` is the rule for asserting
   that columns are present; it fails like any other check.
 
+## How RowGate builds SQL
+
+RowGate never puts text from a rules file or a data file name into SQL.
+Values (in_set members, bounds, patterns, the delimiter and the file path)
+are bound as query parameters, and column names are written as quoted
+identifiers with any `"` inside doubled. Everything else in RowGate's SQL is
+fixed text in its source code. DuckDB runs in memory, can read only the one
+data file, cannot write files or install or load extensions, and its
+settings are locked before any check runs.
+
+The test suite checks this with hostile names, values, patterns and file
+names, such as `x" ; drop table y; --`, `$rowgate_path`, rich markup,
+terminal escape codes, and the same name in two Unicode forms (NFC and
+NFD, which stay different columns). Besides checking the results, it
+records every SQL statement sent to DuckDB and checks that none holds any
+of that text once the quoted column names are taken out.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
