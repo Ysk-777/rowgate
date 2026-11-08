@@ -1,3 +1,5 @@
 # Store text files with LF and check them out with LF on every system,
 # so a Windows checkout does not change line endings.
 * text=auto eol=lf
+# Parquet files are binary: never convert their line endings.
+*.parquet binary

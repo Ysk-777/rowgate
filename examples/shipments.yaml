@@ -1,0 +1,28 @@
+# Rules for shipments.parquet, which holds invented data (see README.md here).
+# Some checks fail on purpose, so "rowgate check shipments.yaml" exits with code 1.
+version: 1
+source:
+  path: shipments.parquet
+checks:
+  - rule: columns_exist
+    columns: [shipment_id, order_id, method, weight_kg, shipped_on, tracking]
+  - rule: row_count
+    min: 1
+  - rule: not_null
+    column: tracking
+  - rule: unique
+    column: shipment_id
+  - rule: in_set
+    column: method
+    values: [ground, air, sea]
+  - rule: range
+    column: weight_kg
+    min: 0
+    max: 50
+    severity: warn
+  - rule: range
+    column: shipped_on
+    min: 2026-01-01
+  - rule: regex
+    column: tracking
+    pattern: 'TRK[0-9]{6}'

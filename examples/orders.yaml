@@ -1,0 +1,29 @@
+# Rules for orders.csv, which holds invented data (see README.md here).
+# Every check passes, so "rowgate check orders.yaml" exits with code 0.
+version: 1
+source:
+  path: orders.csv
+checks:
+  - rule: columns_exist
+    columns: [order_id, status, amount, sku, ordered_on]
+  - rule: row_count
+    min: 1
+    max: 100000
+  - rule: not_null
+    column: order_id
+  - rule: unique
+    column: order_id
+  - rule: in_set
+    column: status
+    values: [new, paid, shipped]
+  - rule: range
+    column: amount
+    min: 0
+    max: 10000
+  - rule: range
+    column: ordered_on
+    min: 2026-01-01
+    max: 2026-12-31
+  - rule: regex
+    column: sku
+    pattern: '[A-Z]{3}-[0-9]{4}'
