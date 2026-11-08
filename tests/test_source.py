@@ -6,9 +6,11 @@ import bz2
 import csv
 import gzip
 import io
+import json
 import lzma
 import os
 import re
+import subprocess
 import sys
 import zipfile
 from collections.abc import Callable, Iterator
@@ -1135,69 +1137,92 @@ def test_key_value_folders_do_not_add_csv_columns(tmp_path: Path, folders: str) 
 # --- DuckDB's parallel CSV reader ----------------------------------------------------------------
 
 # DuckDB's CSV scanner splits a file into chunks of 8,000,000 bytes. When a
-# chunk starts inside a quoted field that holds a line break, the parallel
-# reader gives up on a perfectly valid file ("does not support a full read on
-# this file"). RowGate reads CSV with parallel := false.
+# chunk starts inside a quoted field whose lines look like records of their
+# own, the parallel reader gives up on a perfectly valid file. RowGate reads
+# CSV with parallel := false. On DuckDB 2.0.0 the file below makes the
+# parallel reader fail at 1, 2, 4 and 8 threads; the same records in a file
+# under 8,000,000 bytes (7.9 MB was tried) are read without trouble.
 CHUNK = 8_000_000
 
 
-def quoted_line_break_across_a_chunk() -> tuple[bytes, int]:
-    """A valid CSV file just over 8 MB whose chunk boundary falls inside quotes."""
+def quoted_lines_that_look_like_records(target: int = 8_500_000) -> tuple[bytes, int]:
+    """A valid CSV file of about ``target`` bytes, and how many records it has.
+
+    Record n is n,"start n<LF>n+1,fake<LF>n+2,fake xxx": its quoted text holds
+    two lines that look like records, so a reader that starts in the middle
+    of the file cannot tell where records begin.
+    """
     parts = [b"id,text\n"]
-    size = len(parts[0])
-    number = 0
-    while True:
-        number += 1
-        record = (
-            f'{number},"line one {number}\nline two with, comma and ""quotes"" '
-            f'{"x" * (number % 97)}"\n'
-        ).encode()
-        if size + len(record) > CHUNK - 200:
-            break
+    size, count = 8, 0
+    while size < target:
+        filler = "x" * (count % 50)
+        record = f'{count},"start {count}\n{count + 1},fake\n{count + 2},fake {filler}"\n'.encode()
         parts.append(record)
         size += len(record)
-    prefix = f'{number},"line one '.encode()
-    # This record's first line runs across byte 8,000,000. After its quoted
-    # line break comes text that looks like a record of its own, which is what
-    # the reader starting the next chunk cannot make sense of.
-    second_line = b'\nline two with, comma and ""quotes"" end"\n'
-    parts.append(prefix + b"y" * (CHUNK - size - len(prefix) + 50) + second_line)
-    for tail in range(number + 1, number + 50):
-        parts.append(f'{tail},"line one {tail}\nline two with, comma {tail}"\n'.encode())
-    return b"".join(parts), number + 49  # records 1 .. number - 1, the filler, 49 more
+        count += 1
+    return b"".join(parts), count
 
 
 @pytest.fixture
 def chunk_boundary_in_quotes(tmp_path: Path) -> tuple[Path, int]:
-    content, expected_rows = quoted_line_break_across_a_chunk()
+    content, records = quoted_lines_that_look_like_records()
     path = tmp_path / "data.csv"
     path.write_bytes(content)
     assert len(content) > CHUNK
-    return path, expected_rows
+    return path, records
 
 
 def test_a_file_the_parallel_reader_gives_up_on_is_read(
     tmp_path: Path, chunk_boundary_in_quotes: tuple[Path, int]
 ) -> None:
-    _, expected_rows = chunk_boundary_in_quotes
+    # Fails if RowGate reads CSV with parallel := true: DuckDB gives up on this file.
+    _, records = chunk_boundary_in_quotes
+    assert records == 125_098
     with open_dataset(tmp_path / "rules.yaml", source("data.csv")) as dataset:
-        assert dataset.row_count == expected_rows
-        last = dataset.scalar(f"SELECT max(id::INTEGER) FROM {dataset.relation}")  # noqa: S608
-        assert last == expected_rows
+        assert dataset.row_count == records
+        found = dataset.row(
+            "SELECT min(id::BIGINT), max(id::BIGINT), count(DISTINCT id), "  # noqa: S608
+            "count(*) FILTER (WHERE text IS DISTINCT FROM 'start ' || id || chr(10) "
+            "|| (id::BIGINT + 1) || ',fake' || chr(10) || (id::BIGINT + 2) || ',fake ' "
+            f"|| repeat('x', (id::BIGINT % 50)::INTEGER)) FROM {dataset.relation}"
+        )
+    # Ids 0 .. records - 1, each once, and every record's text exactly as written.
+    assert found == (0, records - 1, records, 0)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Checks that DuckDB's parallel CSV reader still gives up on this valid file. If a "
-        "DuckDB update fixes that, this test starts failing (reported as xfail): reconsider "
-        "RowGate's parallel := false, which costs about 30% on large files."
-    ),
-)
-@pytest.mark.parametrize("threads", [1, 4])
+def test_the_whole_file_is_checked_through_the_command_line(
+    tmp_path: Path, chunk_boundary_in_quotes: tuple[Path, int]
+) -> None:
+    _, records = chunk_boundary_in_quotes
+    rules = tmp_path / "rules.yaml"
+    rules.write_text(
+        "version: 1\nsource: {path: data.csv}\nchecks:\n"
+        f"  - {{rule: row_count, min: {records}, max: {records}}}\n"
+        "  - {rule: unique, column: id}\n"
+        "  - {rule: regex, column: text,\n"
+        "     pattern: '(?s)start [0-9]+\\n[0-9]+,fake\\n[0-9]+,fake x*'}\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [sys.executable, "-m", "rowgate", "check", str(rules), "--format", "json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (completed.returncode, completed.stderr) == (0, "")
+    report = json.loads(completed.stdout)
+    assert report["summary"] == {"passed": 3, "failed": 0, "warned": 0, "total_rows": records}
+
+
+@pytest.mark.parametrize("threads", [1, 2, 4, 8])
 def test_duckdb_parallel_reader_still_gives_up_on_this_file(
     chunk_boundary_in_quotes: tuple[Path, int], threads: int
 ) -> None:
+    """DuckDB's parallel CSV reader still fails on this valid file.
+
+    If a DuckDB update fixes the bug, this test fails: then reconsider
+    RowGate's parallel := false, which makes large files slower to read.
+    """
     path, _ = chunk_boundary_in_quotes
     options = re.sub(r", parallel := \w+", "", source_module.CSV_RELATION)
     parallel = options[:-1] + ", parallel := true)"
