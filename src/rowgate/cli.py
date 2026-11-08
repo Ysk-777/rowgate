@@ -27,6 +27,9 @@ EXIT_OK = 0
 EXIT_CHECKS_FAILED = 1
 EXIT_ERROR = 2
 
+# Path("") is the current folder, so an empty path would read as a folder.
+EMPTY_RULES_PATH = "the rules file path is empty"
+
 app = typer.Typer(
     name="rowgate",
     help="Check local CSV and Parquet files against rules written in YAML.",
@@ -185,6 +188,8 @@ def report_errors(
 @app.command()
 def validate(rules: RulesArgument, debug: DebugOption = False) -> None:
     """Check a rules file for mistakes, without reading any data."""
+    if not rules:
+        ErrorReporter().usage_error(EMPTY_RULES_PATH)
     with report_errors(debug):
         rules_file = load_rules(rules)
         count = len(rules_file.checks)
@@ -220,6 +225,8 @@ def write_starter(text: str) -> None:
 
     Refused if anything has that name already, or if its folder is missing.
     """
+    if not text:
+        raise RowGateError("the file path is empty; give a file name, such as 'rowgate.yaml'")
     shown = quoted(text)
     if looks_like_url(text):
         raise RowGateError(f"{shown} looks like a URL; RowGate writes local files only")
@@ -260,6 +267,8 @@ def check(
     """
     as_json = output_format is OutputFormat.json
     reporter = ErrorReporter(as_json)
+    if not rules:
+        reporter.usage_error(EMPTY_RULES_PATH)
     try:
         sample_count = parse_max_samples(max_samples)
     except UsageError as exc:

@@ -150,3 +150,10 @@ def test_init_shows_windows_style_paths_as_written(in_tmp: Path) -> None:
     code, out, _ = run("init", "a\\rules.yaml")
     assert code == 0
     assert out.startswith("created a\\rules.yaml;")
+
+
+def test_init_refuses_an_empty_path(in_tmp: Path) -> None:
+    code, out, err = run("init", "")
+    assert (code, out) == (2, "")
+    assert err == "error: the file path is empty; give a file name, such as 'rowgate.yaml'\n"
+    assert list(in_tmp.iterdir()) == []

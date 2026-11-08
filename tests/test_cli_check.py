@@ -484,3 +484,10 @@ def test_one_more_row_is_singular(tmp_path: Path) -> None:
     data = b"order_id,status,amount\n1,a,\n2,b,\n"
     _, out, _ = run("check", str(project(tmp_path, NOT_NULL_AMOUNT, data)), "--max-samples", "1")
     assert "        ... and 1 more row\n" in out
+
+
+def test_an_empty_rules_path_has_its_own_message() -> None:
+    assert run("check", "") == (2, "", "error: the rules file path is empty\n")
+    code, out, err = run("check", "", "--format", "json")
+    assert (code, out) == (2, "")
+    assert err == '{"error": "the rules file path is empty", "details": []}\n'

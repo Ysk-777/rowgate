@@ -234,3 +234,8 @@ def test_surprising_yaml_values_exit_with_code_2(tmp_path: Path) -> None:
         "the number 83; write 83 if you mean that number, or put it in quotes ('0123') for "
         "text (line 6, column 13)\n"
     )
+
+
+def test_an_empty_rules_path_has_its_own_message() -> None:
+    # Path("") is the current folder, which used to give ": is a directory".
+    assert run("validate", "") == (2, "", "error: the rules file path is empty\n")
