@@ -1,7 +1,10 @@
 # Roadmap
 
-Planned work after v0.1. None of it is built yet. Each item lists what "done"
+Planned work after v0.1. None of it is built yet: everything RowGate 0.1.0
+does is described in the [README](README.md). Each item lists what "done"
 means and a rough estimate of the effort, in hours.
+
+**Total: 147 hours** for the 14 items below.
 
 ### 1. Cross-column rules
 
@@ -100,10 +103,12 @@ Estimate: 14 hours.
 - A reproducible benchmark script with generated data of 10M and 50M rows, for
   CSV and Parquet, reporting time and peak memory.
 - Targets set from the first measurement and checked in CI on a smaller size.
-- Candidates: one DuckDB pass instead of RowGate's own CSV pass, and grouping
-  several unique checks in one scan.
+- Candidates: one DuckDB pass instead of RowGate's own CSV pass, grouping
+  several unique checks in one scan, and DuckDB's parallel CSV reader once it
+  reads every valid file (a test in `tests/test_source.py` reports when the
+  known failing file starts to work).
 
-Estimate: 16 hours.
+Estimate: 19 hours.
 
 ### 11. Rule severity thresholds
 
@@ -136,3 +141,15 @@ Estimate: 12 hours.
 - Tests cover the edges of each day and daylight-saving changes.
 
 Estimate: 8 hours.
+
+### 14. Samples for Parquet files with a column named file_row_number
+
+Such a file hides DuckDB's own row numbers, so v0.1 refuses to show samples
+for it (exit 2) and asks for `--no-samples`.
+
+- Row numbers come from a source that a data column cannot hide, such as
+  reading the column under another name.
+- Samples for such a file have the right row numbers, tested with the column
+  in every letter case and with several row groups.
+
+Estimate: 3 hours.
