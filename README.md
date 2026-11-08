@@ -662,8 +662,10 @@ N from 1 to 1000; anything else is a usage error, exit 2).
   first appears and how many rows have it, in order of first appearance.
 - If there are more failing rows than samples, the last line says how many
   more (`... and 7 more rows`).
-- Only the status words are coloured, and only on a terminal that supports
-  colour.
+- Only the status words are coloured, and only when the output is a
+  terminal: `NO_COLOR=1` removes the colour (`FAIL` stays bold),
+  `FORCE_COLOR=1` forces it even into a file or pipe, and `--format json`
+  never contains escape codes, whatever is set.
 
 `--no-samples` promises that no data value from the file appears anywhere in
 the output, error messages included: no samples are collected, an
