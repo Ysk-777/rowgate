@@ -29,6 +29,10 @@ TERMINAL_VARIABLES = (
     "TERMINAL_WIDTH",
     "COLUMNS",
     "LINES",
+    # rich turns colour off for TERM=dumb and TERM=unknown, and reads
+    # COLORTERM for the colour depth.
+    "TERM",
+    "COLORTERM",
 )
 for _name in TERMINAL_VARIABLES:
     os.environ.pop(_name, None)
