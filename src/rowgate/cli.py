@@ -20,6 +20,8 @@ from rowgate.checks import DEFAULT_SAMPLES, MAX_SAMPLES, run_checks
 from rowgate.display import escaped, quoted
 from rowgate.errors import RowGateError, UsageError
 from rowgate.loader import load_rules
+from rowgate.rules import looks_like_url
+from rowgate.starter import STARTER_RULES
 
 EXIT_OK = 0
 EXIT_CHECKS_FAILED = 1
@@ -190,6 +192,55 @@ def validate(rules: RulesArgument, debug: DebugOption = False) -> None:
             f"{escaped(str(rules))} is valid: {count} {noun} on {escaped(source.path)} "
             f"({source.file_format})"
         )
+
+
+# Text, not Path: Path would turn "https://x" into "https:/x" before the
+# URL check sees it.
+InitPathArgument = Annotated[
+    str,
+    typer.Argument(metavar="[PATH]", help="Where to write the starter rules file."),
+]
+
+
+@app.command()
+def init(path: InitPathArgument = "rowgate.yaml", debug: DebugOption = False) -> None:
+    """Write a commented starter rules file. Never overwrites a file."""
+    with report_errors(debug):
+        write_starter(path)
+        shown = escaped(path)
+        typer.echo(
+            f"created {shown}; set source.path to your data file, then run rowgate validate {shown}"
+        )
+
+
+def write_starter(text: str) -> None:
+    """Create the file ``text`` names with the starter rules.
+
+    Refused if anything has that name already, or if its folder is missing.
+    """
+    shown = quoted(text)
+    if looks_like_url(text):
+        raise RowGateError(f"{shown} looks like a URL; RowGate writes local files only")
+    path = Path(text)
+    if path.is_dir():
+        example = quoted(str(path / "rowgate.yaml"))
+        raise RowGateError(f"{shown} is a folder; give a file name, such as {example}")
+    folder = path.parent
+    if not folder.is_dir():
+        problem = "is a file, not a folder" if folder.exists() else "does not exist"
+        raise RowGateError(f"cannot create {shown}: {quoted(str(folder))} {problem}")
+    try:
+        # "x" creates the file only if nothing has that name, in one step, so
+        # an existing file is never overwritten, even one created a moment ago.
+        with path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(STARTER_RULES)
+    except FileExistsError:
+        raise RowGateError(
+            f"{shown} already exists; RowGate never overwrites a file, so choose another "
+            "name or move that file away"
+        ) from None
+    except OSError as exc:
+        raise RowGateError(f"cannot create {shown}: {exc.strerror or exc}") from None
 
 
 @app.command()

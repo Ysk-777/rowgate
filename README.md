@@ -23,6 +23,25 @@ Every error is one `error:` line on stderr, with any details indented below
 it. That includes mistakes on the command line itself, such as a missing
 argument or an unknown option, which end with a hint to run `--help`.
 
+## Starting a rules file
+
+```bash
+rowgate init [PATH]
+```
+
+writes a commented starter rules file to `PATH` (`rowgate.yaml` by
+default): one active check, `row_count`, and a commented-out example of
+every other rule, each ready to use by removing its `# `. It passes
+`rowgate validate` as written.
+
+- It never overwrites anything: if a file (or a link, even a broken one)
+  already has that name, it stops with exit 2 and leaves it alone. The file
+  is created in one step that fails if the name is taken, so a file created
+  at the same moment is not overwritten either.
+- The folder must exist (exit 2 otherwise), and `PATH` must not be a folder
+  or a URL.
+- The file is UTF-8 with `\n` line endings on every system.
+
 ## Checking a file
 
 ```bash

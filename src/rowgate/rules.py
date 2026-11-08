@@ -77,6 +77,11 @@ def describe_value(value: object) -> str:
     return f"a value of type {type(value).__name__}"
 
 
+def looks_like_url(path: str) -> bool:
+    """Whether ``path`` starts like a URL (https://, s3://, file://, ...)."""
+    return _URL.match(path) is not None
+
+
 def glob_characters(path: str) -> str:
     """The characters in ``path`` that DuckDB would read as a glob pattern, quoted."""
     found = [char for char in GLOB_CHARACTERS if char in path]
@@ -115,7 +120,7 @@ class Source(_StrictModel):
             raise ValueError("must not be blank")
         if "\x00" in value:
             raise ValueError("must not contain a NUL character")
-        if _URL.match(value):
+        if looks_like_url(value):
             raise ValueError("URLs are not supported; RowGate reads local files only")
         glob = glob_characters(value)
         if glob:
