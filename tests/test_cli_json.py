@@ -251,7 +251,7 @@ def test_an_internal_error_with_no_samples_is_json_with_its_type_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def broken(*args: object, **kwargs: object) -> None:
-        raise ValueError("MRK-secret-value")
+        raise ValueError("MRK-data-value")
 
     monkeypatch.setattr(cli, "run_checks", broken)
     code, out, err = run("check", str(csv_project(tmp_path)), "--format", "json", "--no-samples")
