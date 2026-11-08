@@ -11,6 +11,9 @@ jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
+    env:
+      # Fixed Hypothesis examples, so a CI run can never pass or fail by chance.
+      HYPOTHESIS_PROFILE: ci
     strategy:
       fail-fast: false
       matrix:
