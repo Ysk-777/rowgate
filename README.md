@@ -1,11 +1,447 @@
 # RowGate
 
-RowGate is a command-line tool that checks a local CSV or Parquet file against
-rules you write in YAML. It runs the checks with DuckDB, reports failures
-clearly, and exits with a code that CI can use.
+RowGate checks a local CSV or Parquet file against rules you write in YAML,
+and tells you which rows break them. It runs the checks with DuckDB, prints
+a clear report (as text or as JSON), and exits with a code that CI can use:
+0 if the data passes, 1 if a check fails, 2 if the rules or the data cannot
+be used.
 
-RowGate is in early development. The full documentation will be written before
-the first release; this page records the behaviour decided so far.
+```yaml
+version: 1
+source:
+  path: orders.csv
+checks:
+  - rule: unique
+    column: order_id
+  - rule: in_set
+    column: status
+    values: [new, paid, shipped]
+  - rule: range
+    column: amount
+    min: 0
+    max: 10000
+```
+
+## Who it is for
+
+RowGate is for people who receive data files, such as exports, extracts or
+files from a partner, and want to stop a bad file before it is loaded or
+published: as a step in CI, a pre-load check in a pipeline, or a quick check
+on the command line.
+
+- It runs locally, on one file, with nothing to set up: no server, no
+  database, no account.
+- It needs no network, sends nothing anywhere, and refuses URLs.
+- It guesses nothing about your data. A CSV file is read exactly as written,
+  and numbers are compared exactly, digit by digit.
+- Its output is deterministic, and `--no-samples` keeps every data value
+  out of it, for logs that others can read.
+
+## Built with
+
+- Python 3.11 or newer
+- [DuckDB](https://duckdb.org) to read and check the data (MIT license)
+- [Typer](https://typer.tiangolo.com) for the command line (MIT)
+- [Rich](https://github.com/Textualize/rich) for the text report (MIT)
+- [PyYAML](https://pyyaml.org) for the rules file (MIT)
+- [pydantic](https://docs.pydantic.dev) to validate the rules (MIT)
+
+The tests use pytest, pytest-cov, Hypothesis, ruff and mypy.
+
+## Install
+
+RowGate is not on PyPI yet. Install it from the repository, into a virtual
+environment:
+
+```bash
+git clone https://github.com/Ysk-777/rowgate.git
+```
+
+```bash
+cd rowgate
+```
+
+```bash
+python -m pip install .
+```
+
+Or build a wheel and install that (`python -m pip install build`, then
+`python -m build`, then `python -m pip install dist/rowgate-0.1.0-py3-none-any.whl`).
+
+Check that it works:
+
+<!-- readme-test: run in empty, exit 0 -->
+```bash
+rowgate --version
+```
+
+```text
+rowgate 0.1.0
+```
+
+## Quick start
+
+Write a starter rules file:
+
+<!-- readme-test: run in empty, exit 0 -->
+```bash
+rowgate init
+```
+
+```text
+created rowgate.yaml; set source.path to your data file, then run rowgate validate rowgate.yaml
+```
+
+`rowgate.yaml` has one active check and a commented-out example of every
+other rule. It is valid as written:
+
+<!-- readme-test: run in empty, exit 0 -->
+```bash
+rowgate validate rowgate.yaml
+```
+
+```text
+rowgate.yaml is valid: 1 check on data.csv (csv)
+```
+
+It points at `data.csv`, which does not exist yet, so a check stops with
+exit code 2:
+
+<!-- readme-test: run in empty, exit 2 -->
+```bash
+rowgate check rowgate.yaml
+```
+
+```text
+error: data file 'data.csv' not found, relative to the rules file 'rowgate.yaml'
+```
+
+Set `source.path` to your file, add checks, and run `rowgate check` again.
+
+## A full example
+
+The [`examples`](examples) folder has two invented data files, with a rules
+file for each; together they use all seven rules. All of the data there is
+fictional. The commands below run in that folder (`cd examples`).
+
+`orders.yaml` checks `orders.csv`, and everything passes:
+
+<!-- readme-test: run in examples, exit 0 -->
+```bash
+rowgate validate orders.yaml
+```
+
+```text
+orders.yaml is valid: 8 checks on orders.csv (csv)
+```
+
+<!-- readme-test: run in examples, exit 0 -->
+```bash
+rowgate check orders.yaml
+```
+
+```text
+Source: orders.csv (csv, 8 rows, 5 columns)
+
+PASS  1. columns_exist: all 5 columns present
+PASS  2. row_count: 8 rows, expected between 1 and 100000
+PASS  3. not_null 'order_id': no NULL values
+PASS  4. unique 'order_id': no repeated values
+PASS  5. in_set 'status': every value is in the set
+PASS  6. range 'amount': every value is a number from 0 to 10000
+PASS  7. range 'ordered_on': every value is a date from 2026-01-01 to 2026-12-31
+PASS  8. regex 'sku': every value matches the pattern
+
+8 checks: 8 passed, 0 failed, 0 warned
+```
+
+`shipments.yaml` checks `shipments.parquet`, which has problems on purpose:
+
+```yaml
+version: 1
+source:
+  path: shipments.parquet
+checks:
+  - rule: columns_exist
+    columns: [shipment_id, order_id, method, weight_kg, shipped_on, tracking]
+  - rule: row_count
+    min: 1
+  - rule: not_null
+    column: tracking
+  - rule: unique
+    column: shipment_id
+  - rule: in_set
+    column: method
+    values: [ground, air, sea]
+  - rule: range
+    column: weight_kg
+    min: 0
+    max: 50
+    severity: warn
+  - rule: range
+    column: shipped_on
+    min: 2026-01-01
+  - rule: regex
+    column: tracking
+    pattern: 'TRK[0-9]{6}'
+```
+
+<!-- readme-test: run in examples, exit 1 -->
+```bash
+rowgate check shipments.yaml
+```
+
+```text
+Source: shipments.parquet (parquet, 8 rows, 6 columns)
+
+PASS  1. columns_exist: all 6 columns present
+PASS  2. row_count: 8 rows, expected at least 1
+FAIL  3. not_null 'tracking': 1 of 8 rows is NULL
+        row 3: NULL
+FAIL  4. unique 'shipment_id': 2 of 8 rows have a value that appears more than once
+        row 3: 5003, appears 2 times
+FAIL  5. in_set 'method': 2 of 8 rows have a value outside the set
+        row 4: 'Air'
+        row 7: 'drone'
+WARN  6. range 'weight_kg': 2 of 8 rows are not a number from 0 to 50
+        row 5: nan
+        row 6: -2.0
+FAIL  7. range 'shipped_on': 1 of 8 rows is not a date of at least 2026-01-01
+        row 6: 2025-12-31
+FAIL  8. regex 'tracking': 1 of 8 rows does not match the pattern
+        row 6: 'trk106'
+
+8 checks: 2 passed, 5 failed, 1 warned
+```
+
+Five checks fail, so the exit code is 1. The `weight_kg` range has
+`severity: warn`: it is reported, but never fails the run on its own.
+Each failing check lists up to five failing rows, by row number, with the
+value; for `unique`, each repeated value is shown once, with the row where
+it first appears.
+
+With `--no-samples`, no value from the data appears anywhere in the output:
+
+<!-- readme-test: run in examples, exit 1 -->
+```bash
+rowgate check shipments.yaml --no-samples
+```
+
+```text
+Source: shipments.parquet (parquet, 8 rows, 6 columns)
+
+PASS  1. columns_exist: all 6 columns present
+PASS  2. row_count: 8 rows, expected at least 1
+FAIL  3. not_null 'tracking': 1 of 8 rows is NULL
+FAIL  4. unique 'shipment_id': 2 of 8 rows have a value that appears more than once
+FAIL  5. in_set 'method': 2 of 8 rows have a value outside the set
+WARN  6. range 'weight_kg': 2 of 8 rows are not a number from 0 to 50
+FAIL  7. range 'shipped_on': 1 of 8 rows is not a date of at least 2026-01-01
+FAIL  8. regex 'tracking': 1 of 8 rows does not match the pattern
+
+8 checks: 2 passed, 5 failed, 1 warned
+```
+
+The same run as JSON, with at most one sample per check:
+
+<!-- readme-test: run in examples, exit 1 -->
+```bash
+rowgate check shipments.yaml --format json --max-samples 1
+```
+
+<details>
+<summary>The JSON report</summary>
+
+```json
+{
+  "schema_version": 1,
+  "rowgate_version": "0.1.0",
+  "source": {
+    "path": "shipments.parquet",
+    "format": "parquet",
+    "columns": 6
+  },
+  "summary": {
+    "passed": 2,
+    "failed": 5,
+    "warned": 1,
+    "total_rows": 8
+  },
+  "checks": [
+    {
+      "index": 1,
+      "rule": "columns_exist",
+      "column": null,
+      "column_type": null,
+      "severity": "error",
+      "status": "passed",
+      "failing_rows": null,
+      "message": "all 6 columns present",
+      "samples": null,
+      "not_shown": null
+    },
+    {
+      "index": 2,
+      "rule": "row_count",
+      "column": null,
+      "column_type": null,
+      "severity": "error",
+      "status": "passed",
+      "failing_rows": null,
+      "message": "8 rows, expected at least 1",
+      "samples": null,
+      "not_shown": null
+    },
+    {
+      "index": 3,
+      "rule": "not_null",
+      "column": "tracking",
+      "column_type": "VARCHAR",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 1,
+      "message": "1 of 8 rows is NULL",
+      "samples": [
+        {
+          "row": 3,
+          "value": null,
+          "count": null,
+          "length": null,
+          "truncated": false
+        }
+      ],
+      "not_shown": 0
+    },
+    {
+      "index": 4,
+      "rule": "unique",
+      "column": "shipment_id",
+      "column_type": "BIGINT",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 2,
+      "message": "2 of 8 rows have a value that appears more than once",
+      "samples": [
+        {
+          "row": 3,
+          "value": "5003",
+          "count": 2,
+          "length": 4,
+          "truncated": false
+        }
+      ],
+      "not_shown": 0
+    },
+    {
+      "index": 5,
+      "rule": "in_set",
+      "column": "method",
+      "column_type": "VARCHAR",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 2,
+      "message": "2 of 8 rows have a value outside the set",
+      "samples": [
+        {
+          "row": 4,
+          "value": "Air",
+          "count": null,
+          "length": 3,
+          "truncated": false
+        }
+      ],
+      "not_shown": 1
+    },
+    {
+      "index": 6,
+      "rule": "range",
+      "column": "weight_kg",
+      "column_type": "DOUBLE",
+      "severity": "warn",
+      "status": "warned",
+      "failing_rows": 2,
+      "message": "2 of 8 rows are not a number from 0 to 50",
+      "samples": [
+        {
+          "row": 5,
+          "value": "nan",
+          "count": null,
+          "length": 3,
+          "truncated": false
+        }
+      ],
+      "not_shown": 1
+    },
+    {
+      "index": 7,
+      "rule": "range",
+      "column": "shipped_on",
+      "column_type": "DATE",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 1,
+      "message": "1 of 8 rows is not a date of at least 2026-01-01",
+      "samples": [
+        {
+          "row": 6,
+          "value": "2025-12-31",
+          "count": null,
+          "length": 10,
+          "truncated": false
+        }
+      ],
+      "not_shown": 0
+    },
+    {
+      "index": 8,
+      "rule": "regex",
+      "column": "tracking",
+      "column_type": "VARCHAR",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 1,
+      "message": "1 of 8 rows does not match the pattern",
+      "samples": [
+        {
+          "row": 6,
+          "value": "trk106",
+          "count": null,
+          "length": 6,
+          "truncated": false
+        }
+      ],
+      "not_shown": 0
+    }
+  ]
+}
+```
+
+</details>
+
+## Commands
+
+- `rowgate init [PATH]`
+- `rowgate validate RULES.yaml [--debug]`
+- `rowgate check RULES.yaml [--format text|json] [--no-samples] [--max-samples N] [--debug]`
+- `rowgate --version`
+
+In detail:
+
+- `init` writes a commented starter rules file to `PATH` (`rowgate.yaml` by
+  default). It never overwrites anything: if a file, or a link (even a
+  broken one), already has that name, it stops with exit code 2. The folder
+  must exist, and `PATH` must not be a folder or a URL. The file is UTF-8
+  with `\n` line endings on every system.
+- `validate` checks a rules file for mistakes without reading any data:
+  YAML errors, unknown rules and fields, wrong types, and invalid regular
+  expressions, each with the check number and field.
+- `check` reads the data file the rules name and runs every check, in order.
+  `--format json` prints JSON instead of text. `--max-samples N` (1 to
+  1000, default 5) sets how many failing rows each check lists;
+  `--no-samples` lists none and keeps every data value out of the output.
+  `--debug` prints a traceback, and DuckDB's own message when it fails to
+  read the data. That message can include data values, so `--debug` cannot
+  be combined with `--no-samples`.
 
 ## Exit codes
 
@@ -15,206 +451,61 @@ the first release; this page records the behaviour decided so far.
 | 1 | At least one check with severity `error` failed. |
 | 2 | Bad usage, a bad rules file, an unreadable data file, or an internal error. |
 
-A traceback is printed only when `--debug` is passed. When DuckDB fails to
-read the data, `--debug` also prints DuckDB's original message, which can
-include data values from the file.
-
 Every error is one `error:` line on stderr, with any details indented below
-it. That includes mistakes on the command line itself, such as a missing
-argument or an unknown option, which end with a hint to run `--help`.
+it, and never a traceback unless `--debug` is given. That includes mistakes
+on the command line itself:
 
-## Starting a rules file
-
+<!-- readme-test: run in examples, exit 2 -->
 ```bash
-rowgate init [PATH]
+rowgate check orders.yaml --max-samples 0
 ```
 
-writes a commented starter rules file to `PATH` (`rowgate.yaml` by
-default): one active check, `row_count`, and a commented-out example of
-every other rule, each ready to use by removing its `# `. It passes
-`rowgate validate` as written.
-
-- It never overwrites anything: if a file (or a link, even a broken one)
-  already has that name, it stops with exit 2 and leaves it alone. The file
-  is created in one step that fails if the name is taken, so a file created
-  at the same moment is not overwritten either.
-- The folder must exist (exit 2 otherwise), and `PATH` must not be a folder
-  or a URL.
-- The file is UTF-8 with `\n` line endings on every system.
-
-## Checking a file
-
-```bash
-rowgate check RULES.yaml [--format text|json] [--no-samples] [--max-samples N] [--debug]
+```text
+error: --max-samples must be a whole number from 1 to 1000, got '0'
 ```
 
-Each check prints one line, in the order of the rules file. A failing check
-also lists **samples**: up to 5 of its failing rows (`--max-samples N`, any
-N from 1 to 1000; anything else is a usage error, exit 2).
+## The rules file
 
-- A sample shows the data row number and the value: `row 4: 'abc'`. Rows are
-  numbered from 1, the header is not counted, and a record that spans lines
-  inside quotes is one row. Samples are in file order. See
-  [How rows are numbered](#how-rows-are-numbered).
-- Text values are shown in quotes, exactly as written, except that
-  characters that cannot be printed are written as escapes: a line break is
-  `\n`, a tab `\t`, a terminal escape code `\x1b`, and invisible characters
-  such as a zero-width space or a right-to-left mark `\u200b` and `\u202e`.
-  So nothing in the data can break, colour or rearrange the output, and rich
-  markup such as `[bold]` is shown as text. Backslashes are shown as written,
-  one for one: `C:\data` is `'C:\data'`. (The other side of that choice: a
-  value holding a backslash and an `n` looks the same as one holding a line
-  break.) Values of other types (numbers, dates) are shown in DuckDB's text
-  form, without quotes. A missing value is shown as `NULL`.
-- A value longer than 80 characters is cut to its first 80, followed by
-  `[cut: N characters in all]`.
-- For `unique`, each repeated value is shown once, with the row where it
-  first appears and how many rows have it, in order of first appearance.
-- If there are more failing rows than samples, the last line says how many
-  more (`... and 7 more rows`).
-
-`--no-samples` promises that no data value from the file appears anywhere in
-the output, error messages included: no samples are collected, an
-unexpected internal error is reported by its type only, and `--debug` (which
-can print DuckDB's own messages) cannot be combined with it (exit 2). If both
-are given, `--no-samples` wins over `--max-samples`. Column names, the file
-path and the values in your rules file are still shown: they are not data.
-This is tested by putting a marker string in the data of every rule and of
-every kind of unreadable file, and checking it never reaches stdout or stderr.
-
-### How rows are numbered
-
-- **Parquet** rows are numbered by DuckDB's `file_row_number`: each row's
-  position in the file. It does not depend on the order in which DuckDB's
-  threads happen to read the row groups.
-- **CSV** files have no such number, so RowGate numbers rows with
-  `row_number() OVER ()` as DuckDB reads them. That order is the file's
-  order because RowGate reads CSV files with `parallel := false`: DuckDB
-  runs a query in as many threads as its data source allows, so with a
-  one-thread reader the rows reach the numbering one chunk at a time, in the
-  order the reader reads them from the file. (DuckDB's parallel reader would
-  split the file into ranges read side by side; see
-  [CSV files](#csv-files) for why RowGate does not use it.)
-- A Parquet file with its own column named `file_row_number` (in any letter
-  case) hides DuckDB's row numbers behind that column, so it cannot show
-  samples: such a run stops with exit 2 and says so, and works with
-  `--no-samples`. In a CSV file that name is an ordinary column.
-
-Both are tested against known answers: a 30,000-record CSV file with line
-breaks inside quotes, and a 200,000-row Parquet file in 98 row groups.
-
-## JSON output
-
-`rowgate check RULES.yaml --format json` prints the report as one JSON
-document on stdout, and nothing else; exit codes are the same as for text.
-The structure, with every key always present and always in this order:
-
-```json
-{
-  "schema_version": 1,
-  "rowgate_version": "0.1.0",
-  "source": {"path": "data.csv", "format": "csv", "columns": 4},
-  "summary": {"passed": 1, "failed": 5, "warned": 1, "total_rows": 5},
-  "checks": [
-    {
-      "index": 5,
-      "rule": "in_set",
-      "column": "code",
-      "column_type": "VARCHAR",
-      "severity": "error",
-      "status": "failed",
-      "failing_rows": 2,
-      "message": "2 of 5 rows have a value outside the set",
-      "samples": [
-        {"row": 2, "value": "x\u001b[31m", "count": null, "length": 6, "truncated": false}
-      ],
-      "not_shown": 1
-    }
-  ]
-}
+```yaml
+version: 1                  # always 1
+source:
+  path: data/orders.csv     # relative to this rules file
+  format: csv               # optional: csv or parquet; otherwise from the extension
+  delimiter: ";"            # optional, CSV only: one character; the default is a comma
+checks:
+  - rule: not_null
+    column: order_id
+    severity: warn          # optional on every check: error (default) or warn
 ```
 
-- `schema_version` changes only when a key is removed or changes meaning;
-  new keys may be added without changing it.
-- `source.path` is the path as written in the rules file. `total_rows` is the
-  number of data rows.
-- Each check has `status` `passed`, `failed` (severity `error`) or `warned`
-  (severity `warn`), and `message`, the text report's line for it.
-  `columns_exist` and `row_count` look at the whole file, so their
-  `column`, `column_type`, `failing_rows`, `samples` and `not_shown` are
-  `null`.
-- `samples` is a list in file order (`[]` when nothing failed), or `null`
-  with `--no-samples`. `not_shown` counts the failing rows beyond the
-  samples (for `unique`, the repeated values), and is `null` when `samples`
-  is.
-- Each sample has `row` (1-based, as in the text report) and `value`. For
-  `unique`, `row` is where the value first appears and `count` is how many
-  rows have it; for other rules `count` is `null`. A missing value is
-  `null`, with `length` `null`.
+- `checks` is a list of at least one check, run in the order written.
+- A check with `severity: warn` is reported as `WARN` when it fails, and never
+  makes the exit code 1.
+- Unknown fields, unknown rules and wrong types are errors that name the
+  check number and field, often with a suggestion (`colum`: did you mean
+  `column`?).
+- Every rule except `not_null` ignores NULL values. An empty text (`""` in a
+  CSV file) is a value, not NULL, so it is checked like any other value.
 
-How values are written:
+### The seven rules
 
-- **Every data value is a JSON string**: CSV text exactly as written, or
-  DuckDB's text form of a Parquet value (`column_type` says which type it
-  came from). So a `DOUBLE` NaN is `"nan"`, infinity `"inf"`, a `BIGINT`
-  `9007199254740993` keeps every digit (a JSON number would become
-  `9007199254740992` in many readers), and dates are `"2024-01-31"`.
-- The output is strict JSON, written with Python's `allow_nan=False`: there
-  are no `NaN` or `Infinity` literals anywhere, so every JSON parser reads
-  it. The only JSON numbers are counts, row numbers and lengths, all exact
-  integers.
-- The output is ASCII: control characters, terminal escape codes and every
-  non-ASCII character are `\u` escapes (`"caf\u00e9"`), so a value can never
-  break the document or a terminal.
-- A value longer than 80 characters is cut to its first 80, with
-  `"truncated": true` and its full `length` in characters.
-- `--no-samples` sets every `samples` and `not_shown` to `null`, and no data
-  value appears in stdout or stderr, as for text.
+| Rule | Fields | Fails when |
+| ---- | ------ | ---------- |
+| `columns_exist` | `columns`: a list of names | a listed column is missing (the whole file fails, not rows) |
+| `row_count` | `min`, `max`: whole numbers, at least one | the number of data rows is outside the bounds (inclusive) |
+| `not_null` | `column` | a value is NULL; each such row fails |
+| `unique` | `column` | a value appears more than once; every row with it fails, so three copies are three failing rows |
+| `in_set` | `column`, `values`: a list | a value is not in the list |
+| `range` | `column`, `min` and/or `max`: numbers or dates | a value is outside the bounds (inclusive), or is not a number or date at all |
+| `regex` | `column`, `pattern` | a value does not match the whole pattern |
 
-Errors are a JSON object on one line of stderr, with exit code 2:
-
-```json
-{"error": "a check cannot run on 'data.csv'", "details": ["check 1 (not_null): no column 'idd' (did you mean 'id'?)", "the file has 1 column: 'id'"]}
-```
-
-`details` lists further lines, and is `[]` when there are none; for a rules
-file, it lists every problem. With `--debug`, a `debug` key adds DuckDB's
-original message and the traceback, as lines. Mistakes on the command line
-are JSON too whenever it asks for `--format json`.
-
-The test suite compares the exact output for a CSV file and a Parquet file
-with `tests/golden/report_csv.json` and `tests/golden/report_parquet.json`.
-
-## Writing values in the rules file
-
-RowGate reads YAML with PyYAML, which follows YAML 1.1. Some unquoted values
-mean something surprising in YAML 1.1, so RowGate refuses them and asks you to
-quote them:
-
-| Unquoted | YAML 1.1 reads it as | Write instead |
-| -------- | -------------------- | ------------- |
-| `0123`, `010`, `00` | octal numbers 83, 8, 0 | `'0123'` for text, or `123` |
-| `0x1F`, `0b101` | hex and binary numbers 31, 5 | `'0x1F'`, or `31` |
-| `1:30`, `1:30.5` | base-60 numbers 90, 90.5 | `'1:30'` |
-| `1_000`, `1_000.5` | 1000, 1000.5 | `1000` |
-| `yes`, `no`, `on`, `off`, `True`, `FALSE` | booleans | `true` / `false`, or `'yes'` for text |
-| `1e3`, `1.0e3`, `08`, `0o17` | text (YAML 1.2 reads numbers) | `1000.0`, or `'1e3'` for text |
-
-Only lowercase `true` and `false` are booleans, and only plain decimal numbers
-(`12`, `-3`, `0.5`) are numbers. Quoted values and explicit tags such as
-`!!int 0x1F` are taken as written. A bare `=` is text.
-
-The rules file must also not nest more than 50 levels deep, and an alias may
-not refer to the list or mapping that contains it.
-
-## The rules
-
-Every rule except `not_null` ignores NULL values. An empty text (`""` in a
-CSV file) is a value, not NULL, so it is checked like any other value.
+A check on a column the file does not have stops the run with exit code 2
+and lists the columns the file does have. Use `columns_exist` to assert that
+columns are present as a check that fails like any other.
 
 ### in_set
 
-The values in the rules file are all text, all numbers or all booleans (see
+The values are all text, all numbers or all booleans (see
 [Writing values in the rules file](#writing-values-in-the-rules-file)), and
 that decides how a value in the data is compared:
 
@@ -250,8 +541,9 @@ that decides how a value in the data is compared:
 
 ### range
 
-`min` and `max` are inclusive, and at least one is required. They are both
-numbers or both dates (`2024-01-31`, quoted or not), and the column must fit:
+`min` and `max` are inclusive, and at least one is required; `min` may not
+be greater than `max`. They are both numbers or both dates (`2024-01-31`,
+quoted or not), and the column must fit:
 
 | Bounds | Text value (CSV, or a Parquet text column) | Parquet column |
 | ------ | ------------------------------------------- | -------------- |
@@ -281,6 +573,20 @@ numbers or both dates (`2024-01-31`, quoted or not), and the column must fit:
 - Timestamp columns are not supported yet (exit 2); see the
   [roadmap](ROADMAP.md). Boolean, time, list and other columns are exit 2.
 
+### regex
+
+The pattern must match the **whole** value, as if it were wrapped in `^` and
+`$` (which you may still write). Patterns use RE2, the regular expression
+engine in DuckDB, with no flags: matching is case-sensitive, and `(?i)` at
+the start of the pattern makes it ignore case. RE2 has no lookarounds or
+backreferences; an invalid pattern is a rules error that `rowgate validate`
+reports.
+
+A column that is not text (in a Parquet file) is matched on DuckDB's text
+form of each value. For a `DOUBLE` column that means `100.0`, `1.5`,
+`1e+20` and `nan`, so `[0-9]+[.][0-9]+` matches the first two but not
+`1e+20`. Dates are matched as `2024-01-31`, booleans as `true` and `false`.
+
 ### Exact numbers
 
 RowGate never rounds a number before comparing it, in `in_set` or `range`:
@@ -294,11 +600,6 @@ RowGate never rounds a number before comparing it, in `in_set` or `range`:
   exactly like the bound (`100` for `max: 100`), and otherwise compared digit
   by digit, as sign, digits and exponent. For `in_set`, a whole number is
   compared as a `HUGEINT`, and any other number by its digits.
-- The digit-by-digit comparison costs time only for the values that need
-  it. Measured on 3 million rows in one thread: a range scan of ordinary
-  numbers takes about 0.8 s; if every value is within one step of the bound
-  and written differently from it (`100.00` for `max: 100`), about 2.5 s;
-  `in_set` with decimal members on decimal text, about 4 s.
 - So there is no limit at 38 significant digits, the most a DuckDB
   `DECIMAL` holds: a value with 60 digits is compared exactly with a bound
   with 50. (A fixed `DECIMAL(38,12)` would not do: it rounds
@@ -313,19 +614,189 @@ RowGate never rounds a number before comparing it, in `in_set` or `range`:
   `min`), so the comparison is exact. A bound outside the column type's range
   passes or fails every value, as it should.
 
-### regex
+### Writing values in the rules file
 
-The pattern must match the **whole** value, as if it were wrapped in `^` and
-`$` (which you may still write). Patterns use RE2, the regular expression
-engine in DuckDB, with no flags: matching is case-sensitive, and `(?i)` at
-the start of the pattern makes it ignore case. RE2 has no lookarounds or
-backreferences; an invalid pattern is a rules error that `rowgate validate`
-reports.
+RowGate reads YAML with PyYAML, which follows YAML 1.1. Some unquoted values
+mean something surprising in YAML 1.1, so RowGate refuses them and asks you to
+quote them:
 
-A column that is not text (in a Parquet file) is matched on DuckDB's text
-form of each value. For a `DOUBLE` column that means `100.0`, `1.5`,
-`1e+20` and `nan`, so `[0-9]+[.][0-9]+` matches the first two but not
-`1e+20`. Dates are matched as `2024-01-31`, booleans as `true` and `false`.
+| Unquoted | YAML 1.1 reads it as | Write instead |
+| -------- | -------------------- | ------------- |
+| `0123`, `010`, `00` | octal numbers 83, 8, 0 | `'0123'` for text, or `123` |
+| `0x1F`, `0b101` | hex and binary numbers 31, 5 | `'0x1F'`, or `31` |
+| `1:30`, `1:30.5` | base-60 numbers 90, 90.5 | `'1:30'` |
+| `1_000`, `1_000.5` | 1000, 1000.5 | `1000` |
+| `yes`, `no`, `on`, `off`, `True`, `FALSE` | booleans | `true` / `false`, or `'yes'` for text |
+| `1e3`, `1.0e3`, `08`, `0o17` | text (YAML 1.2 reads numbers) | `1000.0`, or `'1e3'` for text |
+
+Only lowercase `true` and `false` are booleans, and only plain decimal numbers
+(`12`, `-3`, `0.5`) are numbers. Quoted values and explicit tags such as
+`!!int 0x1F` are taken as written. A bare `=` is text.
+
+The rules file must also not nest more than 50 levels deep, and an alias may
+not refer to the list or mapping that contains it.
+
+## Text output
+
+Each check prints one line, in the order of the rules file. A failing check
+also lists **samples**: up to 5 of its failing rows (`--max-samples N`, any
+N from 1 to 1000; anything else is a usage error, exit 2).
+
+- A sample shows the data row number and the value: `row 4: 'abc'`. Rows are
+  numbered from 1, the header is not counted, and a record that spans lines
+  inside quotes is one row. Samples are in file order. See
+  [How rows are numbered](#how-rows-are-numbered).
+- Text values are shown in quotes, exactly as written, except that
+  characters that cannot be printed are written as escapes: a line break is
+  `\n`, a tab `\t`, a terminal escape code `\x1b`, and invisible characters
+  such as a zero-width space or a right-to-left mark `\u200b` and `\u202e`.
+  So nothing in the data can break, colour or rearrange the output, and rich
+  markup such as `[bold]` is shown as text. Backslashes are shown as written,
+  one for one: `C:\data` is `'C:\data'`. (The other side of that choice: a
+  value holding a backslash and an `n` looks the same as one holding a line
+  break.) Values of other types (numbers, dates) are shown in DuckDB's text
+  form, without quotes. A missing value is shown as `NULL`.
+- A value longer than 80 characters is cut to its first 80, followed by
+  `[cut: N characters in all]`.
+- For `unique`, each repeated value is shown once, with the row where it
+  first appears and how many rows have it, in order of first appearance.
+- If there are more failing rows than samples, the last line says how many
+  more (`... and 7 more rows`).
+- Only the status words are coloured, and only on a terminal that supports
+  colour.
+
+`--no-samples` promises that no data value from the file appears anywhere in
+the output, error messages included: no samples are collected, an
+unexpected internal error is reported by its type only, and `--debug` (which
+can print DuckDB's own messages) cannot be combined with it (exit 2). If both
+are given, `--no-samples` wins over `--max-samples`. Column names, the file
+path and the values in your rules file are still shown: they are not data.
+This is tested by putting a marker string in the data of every rule and of
+every kind of unreadable file, and checking it never reaches stdout or stderr.
+
+### How rows are numbered
+
+- **Parquet** rows are numbered by DuckDB's `file_row_number`: each row's
+  position in the file. It does not depend on the order in which DuckDB's
+  threads happen to read the row groups.
+- **CSV** files have no such number, so RowGate numbers rows with
+  `row_number() OVER ()` as DuckDB reads them. That order is the file's
+  order because RowGate reads CSV files with `parallel := false`: DuckDB
+  runs a query in as many threads as its data source allows, so with a
+  one-thread reader the rows reach the numbering one chunk at a time, in the
+  order the reader reads them from the file. (DuckDB's parallel reader would
+  split the file into ranges read side by side; see
+  [CSV files](#csv-files) for why RowGate does not use it.)
+- A Parquet file with its own column named `file_row_number` (in any letter
+  case) hides DuckDB's row numbers behind that column, so it cannot show
+  samples: such a run stops with exit 2 and says so, and works with
+  `--no-samples`. In a CSV file that name is an ordinary column.
+
+Both are tested against known answers: a 30,000-record CSV file with line
+breaks inside quotes, and a 200,000-row Parquet file in 98 row groups.
+
+## JSON output
+
+`rowgate check RULES.yaml --format json` prints the report as one JSON
+document on stdout, and nothing else; exit codes are the same as for text.
+[The full example](#a-full-example) shows a complete report. Every key is
+always present, in this order:
+
+| Key | Value |
+| --- | ----- |
+| `schema_version` | `1`; it changes only when a key is removed or changes meaning (new keys may be added) |
+| `rowgate_version` | the RowGate version, such as `"0.1.0"` |
+| `source` | `path` (as written in the rules file), `format` (`"csv"` or `"parquet"`), `columns` (how many) |
+| `summary` | `passed`, `failed`, `warned`: numbers of checks; `total_rows`: data rows in the file |
+| `checks` | one object per check, in the order of the rules file (below) |
+
+Each check:
+
+| Key | Value |
+| --- | ----- |
+| `index` | the check's number in the rules file, from 1 |
+| `rule`, `column`, `severity` | as in the rules file; `column` is `null` for `columns_exist` and `row_count` |
+| `column_type` | DuckDB's type of the column (`"VARCHAR"` for every CSV column); `null` for whole-file checks |
+| `status` | `"passed"`, `"failed"` (severity `error`) or `"warned"` (severity `warn`) |
+| `failing_rows` | how many rows fail; `null` for whole-file checks |
+| `message` | the text report's line for the check |
+| `samples` | a list of failing rows in file order (`[]` when none fail), or `null` with `--no-samples` and for whole-file checks |
+| `not_shown` | failing rows beyond the samples (for `unique`, repeated values); `null` when `samples` is |
+
+Each sample has `row` (1-based; for `unique`, where the value first
+appears), `value`, `count` (for `unique`, how many rows have the value;
+otherwise `null`), `length` (the value's length in characters) and
+`truncated`. A missing value is `null`, with `length` `null`.
+
+How values are written:
+
+- **Every data value is a JSON string**: CSV text exactly as written, or
+  DuckDB's text form of a Parquet value (`column_type` says which type it
+  came from). So a `DOUBLE` NaN is `"nan"`, infinity `"inf"`, a `BIGINT`
+  `9007199254740993` keeps every digit (a JSON number would become
+  `9007199254740992` in many readers), and dates are `"2024-01-31"`.
+- The output is strict JSON, written with Python's `allow_nan=False`: there
+  are no `NaN` or `Infinity` literals anywhere, so every JSON parser reads
+  it. The only JSON numbers are counts, row numbers and lengths, all exact
+  integers.
+- The output is ASCII: control characters, terminal escape codes and every
+  non-ASCII character are `\u` escapes (`"caf\u00e9"`), so a value can never
+  break the document or a terminal.
+- A value longer than 80 characters is cut to its first 80, with
+  `"truncated": true` and its full `length` in characters.
+- `--no-samples` sets every `samples` and `not_shown` to `null`, and no data
+  value appears in stdout or stderr, as for text.
+
+Errors are one JSON object on one line of stderr, with exit code 2:
+
+<!-- readme-test: run in examples, exit 2 -->
+```bash
+rowgate check missing.yaml --format json
+```
+
+```json
+{"error": "invalid rules file 'missing.yaml' (1 problem)", "details": ["file not found"]}
+```
+
+`details` lists further lines, and is `[]` when there are none; for a rules
+file, it lists every problem. With `--debug`, a `debug` key adds DuckDB's
+original message and the traceback, as lines. Mistakes on the command line
+are JSON too whenever it asks for `--format json`.
+
+## Using RowGate in CI
+
+`rowgate check` exits with 1 when a check with severity `error` fails, and
+with 2 when the rules or the data cannot be used, so either stops a CI job.
+A GitHub Actions job that checks a file on every push:
+
+```yaml
+name: Data checks
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  rowgate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      # Pin a tag or commit you have reviewed, rather than the latest code.
+      - run: python -m pip install "rowgate @ git+https://github.com/Ysk-777/rowgate@main"
+      - run: rowgate check rules/orders.yaml --no-samples
+```
+
+- `--no-samples` keeps every data value out of the CI log, which matters
+  when the log is visible to more people than the data. Leave it out where
+  the samples help and may be shown.
+- To keep a machine-readable report, write the JSON to a file, such as
+  `rowgate check rules/orders.yaml --format json > rowgate-report.json`, and
+  keep it with your CI's artifact step. The exit code is the same.
+- To check rules files without data (for example, in a repository that holds
+  only rules), run `rowgate validate` on each.
 
 ## How RowGate reads data
 
@@ -391,8 +862,7 @@ DuckDB fixed options, with DuckDB's automatic detection switched off:
   names its line. Long fields are fine within that limit.
 - DuckDB reads CSV files in one thread (`parallel := false`). Its parallel
   reader gives up on some valid files with line breaks inside quotes once they
-  pass about 8 MB, so RowGate does not use it. This costs time on big files:
-  a 3-check run on a 3-million-row file took 3.3 s instead of 2.5 s.
+  pass about 8 MB, so RowGate does not use it (see [Limitations](#limitations)).
 - Before checking, RowGate counts the data rows itself and makes sure DuckDB
   read the same number. If they differ, it stops with exit 2 rather than
   check part of the file.
@@ -496,6 +966,73 @@ terminal escape codes, and the same name in two Unicode forms (NFC and
 NFD, which stay different columns). Besides checking the results, it
 records every SQL statement sent to DuckDB and checks that none holds any
 of that text once the quoted column names are taken out.
+
+## Running the tests
+
+From a clone, in a virtual environment:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+```bash
+ruff check .
+```
+
+```bash
+ruff format --check .
+```
+
+```bash
+mypy
+```
+
+```bash
+pytest --cov
+```
+
+The tests need no network and create their data in temporary folders.
+Among them:
+
+- `tests/test_readme.py` runs every command shown with its output in this
+  README, against a copy of `examples/` or an empty folder, and checks that
+  the output and exit code match exactly.
+- `tests/test_reference.py` compares every rule with a simple pure-Python
+  reference on CSV files generated by Hypothesis. Set
+  `HYPOTHESIS_PROFILE=ci` for the fixed examples CI uses, or
+  `HYPOTHESIS_PROFILE=long` for 2,000 random ones.
+- `tests/golden/` holds the exact JSON output for a CSV file and a Parquet
+  file.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full set of checks a change
+must pass.
+
+## Limitations
+
+- **One local file per rules file.** No URLs, glob patterns, several files,
+  compressed CSV or Hive-partitioned Parquet; see the [roadmap](ROADMAP.md).
+- **No timestamps in `range`** (exit 2), and `in_set` does not run on date
+  columns.
+- **CSV files are read in one thread**, because DuckDB's parallel reader
+  gives up on some valid files. On a 3-million-row file with seven checks, a
+  run takes about 3.7 s on the machine RowGate is developed on.
+- **Exact number comparison costs time when many values sit next to a
+  bound** and are written differently from it. In the worst case, when
+  every one of 3 million values is within one step of the bound, a range
+  check scans in about 3.5 s instead of 0.8 s, and `in_set` with decimal
+  members on decimal text in about 4 s.
+- **A text exponent of more than 18 digits** (as in `1e-99999999999999999999`)
+  next to a bound of the same sign is a failing row, because it cannot be
+  compared exactly.
+- **A Parquet column named `file_row_number`** blocks samples for that file
+  (exit 2); `--no-samples` works.
+- **Regular expressions are RE2**, not Python's `re`: no lookarounds or
+  backreferences.
+- **In the text report, a backslash followed by `n` in the data looks the
+  same as a line break**, which is shown as `\n`. The JSON report has no
+  such ambiguity.
+- RowGate is tested on Linux and, in CI, on Windows, with Python 3.11, 3.12
+  and 3.13 and DuckDB 2.0. It has not been tested on macOS.
 
 ## License
 
