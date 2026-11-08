@@ -68,23 +68,35 @@ class AmbiguousScalar:
                 f"false for a boolean, or {quoted} {where}"
             )
         if isinstance(self.meaning, int | Decimal):
+            what, write = _number_phrase(self.meaning)
             return (
-                f"unquoted {self.text} is read by YAML as the number {self.meaning}; write "
-                f"{self.meaning} if you mean that number, or {quoted} {where}"
+                f"unquoted {self.text} is read by YAML as {what}; {write} if you mean that "
+                f"number, or {quoted} {where}"
             )
-        number = _number_it_looks_like(self.text)
+        what, write = _number_phrase(_number_it_looks_like(self.text))
         return (
-            f"unquoted {self.text} is read by YAML as text, not as the number {number}; write "
-            f"{number} if you mean that number, or {quoted} {where}"
+            f"unquoted {self.text} is read by YAML as text, not as {what}; {write} if you "
+            f"mean that number, or {quoted} {where}"
         )
 
 
-def _number_it_looks_like(text: str) -> int | float:
+def _number_phrase(number: int | float | Decimal) -> tuple[str, str]:
+    """How a refusal names the number a value means, and how to write it.
+
+    A number whose decimal text would pass Python's limit (see display.fits_text)
+    is named by its number of digits; it is never turned into text.
+    """
+    if isinstance(number, float) or display.fits_text(number):
+        return f"the number {number}", f"write {number}"
+    return f"a number with {display.digits(number)} digits", "write it as a plain decimal number"
+
+
+def _number_it_looks_like(text: str) -> int | float | Decimal:
     if _OCTAL_1_2.fullmatch(text):
         sign = -1 if text.startswith("-") else 1
-        return sign * int(text.lstrip("+-")[2:], 8)
+        return sign * int(text.lstrip("+-")[2:], 8)  # base 8 needs no decimal text
     if _LEADING_ZERO_INT.fullmatch(text):
-        return int(text)
+        return Decimal(text)  # exact for any length, unlike int(text)
     return float(text)
 
 
@@ -215,22 +227,28 @@ def _construct_decimal(loader: _RulesLoader, node: yaml.ScalarNode) -> Decimal:
 
 
 def _construct_int(loader: _RulesLoader, node: yaml.ScalarNode) -> int | Decimal:
-    """Read a YAML int; one too long for Python's int() becomes an exact Decimal.
+    """Read a YAML int; one too long for decimal text becomes an exact Decimal.
 
-    Python refuses to turn text of more than sys.get_int_max_str_digits()
-    digits (4,300 by default) into an int. Such a number is read as the
-    whole Decimal it is, exactly as if it were written with ".0", so a whole
-    number of any size is accepted.
+    Python refuses to turn more than sys.get_int_max_str_digits() digits
+    (4,300 by default) of decimal text into an int, or an int into that much
+    decimal text. A plain decimal number that long is read as the whole
+    Decimal it is, exactly as if it were written with ".0". A hex, octal or
+    binary one (with an explicit !!int tag) is read as an int, which needs no
+    decimal text, and then made a Decimal with Decimal(int), which does not
+    either. So a whole number of any size is accepted, and never turned into
+    decimal text.
     """
     text = loader.construct_scalar(node)
+    plain = text.replace("_", "")
     limit = sys.get_int_max_str_digits()
-    if limit and _LONG_INT.fullmatch(text) and len(text.lstrip("+-")) > limit:
-        return Decimal(text)
+    if limit and _LONG_DECIMAL_INT.fullmatch(plain) and len(plain.lstrip("+-")) > limit:
+        return Decimal(plain)
     value: int = loader.construct_yaml_int(node)
-    return value
+    return value if display.fits_text(value) else Decimal(value)
 
 
-_LONG_INT = re.compile(r"[-+]?[0-9]+")
+# Decimal digits without a leading zero: YAML 1.1 reads 0777 as octal.
+_LONG_DECIMAL_INT = re.compile(r"[-+]?[1-9][0-9]*")
 
 _SPECIAL_FLOATS = {
     ".inf": "Infinity",

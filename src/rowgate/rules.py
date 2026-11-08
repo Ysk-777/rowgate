@@ -22,6 +22,7 @@ from pydantic import (
     model_validator,
 )
 
+from rowgate import display
 from rowgate.database import regex_error
 from rowgate.display import quoted
 
@@ -57,13 +58,13 @@ def describe_value(value: object) -> str:
     if isinstance(value, bool):
         return f"boolean {'true' if value else 'false'}"
     if isinstance(value, int):
-        return f"integer {value}"
+        return f"integer {display.number(value)}"
     if isinstance(value, Decimal):
         if value.is_nan():
             return "number nan"
         if value.is_infinite():
             return f"number {'-' if value < 0 else ''}inf"
-        return f"number {value}"
+        return f"number {display.number(value)}"
     if isinstance(value, str):
         shown = value if len(value) <= _MAX_SHOWN else value[: _MAX_SHOWN - 3] + "..."
         return f"string {quoted(shown)}"
@@ -197,7 +198,9 @@ class RowCount(_Check):
         if self.min is None and self.max is None:
             raise ValueError("set at least one of min or max")
         if self.min is not None and self.max is not None and self.min > self.max:
-            raise ValueError(f"min ({self.min}) is greater than max ({self.max})")
+            raise ValueError(
+                f"min ({display.bound(self.min)}) is greater than max ({display.bound(self.max)})"
+            )
         return self
 
 
@@ -319,7 +322,10 @@ class Range(_Check):
             if bound_kind(self.min) != bound_kind(self.max):
                 raise ValueError("min and max must both be numbers or both be dates")
             if _greater(self.min, self.max):
-                raise ValueError(f"min ({self.min}) is greater than max ({self.max})")
+                raise ValueError(
+                    f"min ({display.bound(self.min)}) is greater than "
+                    f"max ({display.bound(self.max)})"
+                )
         return self
 
     @property

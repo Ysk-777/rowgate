@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from rowgate import display
 from rowgate.conditions import RowRule, RowTest, Scan, row_test, type_family, type_problem
 from rowgate.display import quoted
 from rowgate.errors import DataError
@@ -324,10 +325,10 @@ def _range_words(check: Range) -> str:
     low, high = check.min, check.max
     noun = "a number" if check.kind == "number" else "a date"
     if low is not None and high is not None:
-        return f"{noun} from {low} to {high}"
+        return f"{noun} from {display.bound(low)} to {display.bound(high)}"
     if low is not None:
-        return f"{noun} of at least {low}"
-    return f"{noun} of at most {high}"
+        return f"{noun} of at least {display.bound(low)}"
+    return f"{noun} of at most {display.bound(high)}"
 
 
 def _unique(index: int, check: Unique, dataset: Dataset, max_samples: int | None) -> CheckResult:
