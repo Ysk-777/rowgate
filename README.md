@@ -19,10 +19,14 @@ A traceback is printed only when `--debug` is passed. When DuckDB fails to
 read the data, `--debug` also prints DuckDB's original message, which can
 include data values from the file.
 
+Every error is one `error:` line on stderr, with any details indented below
+it. That includes mistakes on the command line itself, such as a missing
+argument or an unknown option, which end with a hint to run `--help`.
+
 ## Checking a file
 
 ```bash
-rowgate check RULES.yaml [--no-samples] [--max-samples N] [--debug]
+rowgate check RULES.yaml [--format text|json] [--no-samples] [--max-samples N] [--debug]
 ```
 
 Each check prints one line, in the order of the rules file. A failing check
@@ -79,6 +83,88 @@ every kind of unreadable file, and checking it never reaches stdout or stderr.
 
 Both are tested against known answers: a 30,000-record CSV file with line
 breaks inside quotes, and a 200,000-row Parquet file in 98 row groups.
+
+## JSON output
+
+`rowgate check RULES.yaml --format json` prints the report as one JSON
+document on stdout, and nothing else; exit codes are the same as for text.
+The structure, with every key always present and always in this order:
+
+```json
+{
+  "schema_version": 1,
+  "rowgate_version": "0.1.0",
+  "source": {"path": "data.csv", "format": "csv", "columns": 4},
+  "summary": {"passed": 1, "failed": 5, "warned": 1, "total_rows": 5},
+  "checks": [
+    {
+      "index": 5,
+      "rule": "in_set",
+      "column": "code",
+      "column_type": "VARCHAR",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 2,
+      "message": "2 of 5 rows have a value outside the set",
+      "samples": [
+        {"row": 2, "value": "x\u001b[31m", "count": null, "length": 6, "truncated": false}
+      ],
+      "not_shown": 1
+    }
+  ]
+}
+```
+
+- `schema_version` changes only when a key is removed or changes meaning;
+  new keys may be added without changing it.
+- `source.path` is the path as written in the rules file. `total_rows` is the
+  number of data rows.
+- Each check has `status` `passed`, `failed` (severity `error`) or `warned`
+  (severity `warn`), and `message`, the text report's line for it.
+  `columns_exist` and `row_count` look at the whole file, so their
+  `column`, `column_type`, `failing_rows`, `samples` and `not_shown` are
+  `null`.
+- `samples` is a list in file order (`[]` when nothing failed), or `null`
+  with `--no-samples`. `not_shown` counts the failing rows beyond the
+  samples (for `unique`, the repeated values), and is `null` when `samples`
+  is.
+- Each sample has `row` (1-based, as in the text report) and `value`. For
+  `unique`, `row` is where the value first appears and `count` is how many
+  rows have it; for other rules `count` is `null`. A missing value is
+  `null`, with `length` `null`.
+
+How values are written:
+
+- **Every data value is a JSON string**: CSV text exactly as written, or
+  DuckDB's text form of a Parquet value (`column_type` says which type it
+  came from). So a `DOUBLE` NaN is `"nan"`, infinity `"inf"`, a `BIGINT`
+  `9007199254740993` keeps every digit (a JSON number would become
+  `9007199254740992` in many readers), and dates are `"2024-01-31"`.
+- The output is strict JSON, written with Python's `allow_nan=False`: there
+  are no `NaN` or `Infinity` literals anywhere, so every JSON parser reads
+  it. The only JSON numbers are counts, row numbers and lengths, all exact
+  integers.
+- The output is ASCII: control characters, terminal escape codes and every
+  non-ASCII character are `\u` escapes (`"caf\u00e9"`), so a value can never
+  break the document or a terminal.
+- A value longer than 80 characters is cut to its first 80, with
+  `"truncated": true` and its full `length` in characters.
+- `--no-samples` sets every `samples` and `not_shown` to `null`, and no data
+  value appears in stdout or stderr, as for text.
+
+Errors are a JSON object on one line of stderr, with exit code 2:
+
+```json
+{"error": "a check cannot run on 'data.csv'", "details": ["check 1 (not_null): no column 'idd' (did you mean 'id'?)", "the file has 1 column: 'id'"]}
+```
+
+`details` lists further lines, and is `[]` when there are none; for a rules
+file, it lists every problem. With `--debug`, a `debug` key adds DuckDB's
+original message and the traceback, as lines. Mistakes on the command line
+are JSON too whenever it asks for `--format json`.
+
+The test suite compares the exact output for a CSV file and a Parquet file
+with `tests/golden/report_csv.json` and `tests/golden/report_parquet.json`.
 
 ## Writing values in the rules file
 

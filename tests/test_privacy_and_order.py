@@ -81,15 +81,21 @@ def test_without_no_samples_the_marker_is_shown(tmp_path: Path) -> None:
 # --- with --no-samples it never appears -------------------------------------------------------
 
 
-def test_all_rules_failing_on_csv_show_no_data_value(tmp_path: Path) -> None:
+@pytest.mark.parametrize("output_format", ["text", "json"])
+def test_all_rules_failing_on_csv_show_no_data_value(tmp_path: Path, output_format: str) -> None:
     rules = write(tmp_path, ALL_RULES.format(name="data.csv"), CSV)
-    code, output = process_output("check", str(rules), "--no-samples")
+    with_samples = process_output("check", str(rules), "--format", output_format)
+    code, output = process_output("check", str(rules), "--no-samples", "--format", output_format)
+    assert MARKER in with_samples[1]
     assert code == 1
     assert MARKER not in output
-    assert "6 failed" in output  # every rule except columns_exist failed
+    assert ("6 failed" if output_format == "text" else '"failed": 6') in output
 
 
-def test_all_rules_failing_on_parquet_show_no_data_value(tmp_path: Path) -> None:
+@pytest.mark.parametrize("output_format", ["text", "json"])
+def test_all_rules_failing_on_parquet_show_no_data_value(
+    tmp_path: Path, output_format: str
+) -> None:
     target = tmp_path / "data.parquet"
     duckdb.connect(":memory:").execute(
         "COPY (SELECT * FROM (VALUES "  # noqa: S608 - test data
@@ -98,8 +104,8 @@ def test_all_rules_failing_on_parquet_show_no_data_value(tmp_path: Path) -> None
     )
     rules = tmp_path / "rules.yaml"
     rules.write_text(ALL_RULES.format(name="data.parquet"), encoding="utf-8")
-    with_samples = process_output("check", str(rules))
-    code, output = process_output("check", str(rules), "--no-samples")
+    with_samples = process_output("check", str(rules), "--format", output_format)
+    code, output = process_output("check", str(rules), "--no-samples", "--format", output_format)
     assert MARKER in with_samples[1]
     assert code == 1
     assert MARKER not in output
@@ -125,7 +131,7 @@ def test_unreadable_files_show_no_data_value(tmp_path: Path, data: bytes) -> Non
         "version: 1\nsource: {path: data.csv}\nchecks: [{rule: row_count, min: 1}]\n",
         data,
     )
-    for extra in ([], ["--no-samples"]):
+    for extra in ([], ["--no-samples"], ["--format", "json"], ["--format", "json", "--no-samples"]):
         code, output = cli_output("check", str(rules), *extra)
         assert code == 2
         assert MARKER not in output
@@ -157,12 +163,14 @@ def test_a_duckdb_failure_shows_no_data_value(
         "version: 1\nsource: {path: data.csv}\nchecks: [{rule: row_count, min: 1}]\n",
         data,
     )
-    code, output = cli_output("check", str(rules), "--no-samples")
-    assert code == 2
-    assert MARKER not in output
-    # Without --no-samples, only --debug would show DuckDB's message (and the marker).
-    _, debug_output = cli_output("check", str(rules), "--debug")
-    assert MARKER in debug_output
+    for extra in (["--no-samples"], [], ["--format", "json"], ["--format", "json", "--no-samples"]):
+        code, output = cli_output("check", str(rules), *extra)
+        assert code == 2
+        assert MARKER not in output
+    # Only --debug shows DuckDB's message (and the marker), in either format.
+    for extra in ([], ["--format", "json"]):
+        _, debug_output = cli_output("check", str(rules), "--debug", *extra)
+        assert MARKER in debug_output
 
 
 def test_a_type_mismatch_shows_no_data_value(tmp_path: Path) -> None:

@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "rowgate_version": "0.1.0",
+  "source": {
+    "path": "data.csv",
+    "format": "csv",
+    "columns": 4
+  },
+  "summary": {
+    "passed": 1,
+    "failed": 5,
+    "warned": 1,
+    "total_rows": 5
+  },
+  "checks": [
+    {
+      "index": 1,
+      "rule": "columns_exist",
+      "column": null,
+      "column_type": null,
+      "severity": "error",
+      "status": "passed",
+      "failing_rows": null,
+      "message": "all 4 columns present",
+      "samples": null,
+      "not_shown": null
+    },
+    {
+      "index": 2,
+      "rule": "row_count",
+      "column": null,
+      "column_type": null,
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": null,
+      "message": "5 rows, expected at most 3",
+      "samples": null,
+      "not_shown": null
+    },
+    {
+      "index": 3,
+      "rule": "not_null",
+      "column": "note",
+      "column_type": "VARCHAR",
+      "severity": "warn",
+      "status": "warned",
+      "failing_rows": 2,
+      "message": "2 of 5 rows are NULL",
+      "samples": [
+        {
+          "row": 2,
+          "value": null,
+          "count": null,
+          "length": null,
+          "truncated": false
+        },
+        {
+          "row": 5,
+          "value": null,
+          "count": null,
+          "length": null,
+          "truncated": false
+        }
+      ],
+      "not_shown": 0
+    },
+    {
+      "index": 4,
+      "rule": "unique",
+      "column": "id",
+      "column_type": "VARCHAR",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 2,
+      "message": "2 of 5 rows have a value that appears more than once",
+      "samples": [
+        {
+          "row": 3,
+          "value": "3",
+          "count": 2,
+          "length": 1,
+          "truncated": false
+        }
+      ],
+      "not_shown": 0
+    },
+    {
+      "index": 5,
+      "rule": "in_set",
+      "column": "code",
+      "column_type": "VARCHAR",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 2,
+      "message": "2 of 5 rows have a value outside the set",
+      "samples": [
+        {
+          "row": 2,
+          "value": "x\u001b[31m [bold]y[/bold]",
+          "count": null,
+          "length": 21,
+          "truncated": false
+        },
+        {
+          "row": 4,
+          "value": "long-long-long-long-long-long-long-long-long-long-long-long-long-long-long-long-",
+          "count": null,
+          "length": 100,
+          "truncated": true
+        }
+      ],
+      "not_shown": 0
+    },
+    {
+      "index": 6,
+      "rule": "range",
+      "column": "amount",
+      "column_type": "VARCHAR",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 3,
+      "message": "3 of 5 rows are not a number from 0 to 10",
+      "samples": [
+        {
+          "row": 2,
+          "value": "50",
+          "count": null,
+          "length": 2,
+          "truncated": false
+        },
+        {
+          "row": 4,
+          "value": "9007199254740993",
+          "count": null,
+          "length": 16,
+          "truncated": false
+        }
+      ],
+      "not_shown": 1
+    },
+    {
+      "index": 7,
+      "rule": "regex",
+      "column": "note",
+      "column_type": "VARCHAR",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 2,
+      "message": "2 of 5 rows do not match the pattern",
+      "samples": [
+        {
+          "row": 1,
+          "value": "caf\u00e9",
+          "count": null,
+          "length": 4,
+          "truncated": false
+        },
+        {
+          "row": 3,
+          "value": "line\nbreak",
+          "count": null,
+          "length": 10,
+          "truncated": false
+        }
+      ],
+      "not_shown": 0
+    }
+  ]
+}

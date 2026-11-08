@@ -70,7 +70,12 @@ class CheckResult:
     summary: str
     samples: tuple[Sample, ...] | None = None  # None: not collected, or not row-based
     more: int = 0  # failing rows (or repeated values) beyond the samples
-    text_values: bool = True  # samples are text, shown in quotes
+    column_type: str | None = None  # DuckDB type of the column; None for whole-file checks
+
+    @property
+    def text_values(self) -> bool:
+        """Whether sample values are text (shown in quotes) rather than another type."""
+        return self.column_type is None or type_family(self.column_type) == "text"
 
     @property
     def status(self) -> Status:
@@ -309,10 +314,9 @@ def _row_result(
     else:
         summary = f"{of_rows} {'is' if one else 'are'} NULL" if failing else "no NULL values"
     more = failing - len(samples) if samples is not None else 0
-    text = type_family(_type_of(dataset, check.column)) == "text"
     return CheckResult(
         index, check.rule, check.column, check.severity, failing == 0, failing, summary,
-        samples, more, text,
+        samples, more, _type_of(dataset, check.column),
     )  # fmt: skip
 
 
@@ -330,7 +334,8 @@ def _unique(index: int, check: Unique, dataset: Dataset, max_samples: int | None
     # Every row whose value appears more than once fails: three copies of a
     # value are three failing rows. NULLs are ignored. One grouped scan.
     column = quote_identifier(check.column)
-    text = type_family(_type_of(dataset, check.column)) == "text"
+    column_type = _type_of(dataset, check.column)
+    text = type_family(column_type) == "text"
     if max_samples is None:
         sql = (
             "SELECT count(*), coalesce(sum(copies), 0) FROM (SELECT count(*) AS copies "  # noqa: S608
@@ -364,7 +369,7 @@ def _unique(index: int, check: Unique, dataset: Dataset, max_samples: int | None
     more = groups - len(samples) if samples is not None else 0
     return CheckResult(
         index, check.rule, check.column, check.severity, failing == 0, failing, summary,
-        samples, more, text,
+        samples, more, column_type,
     )  # fmt: skip
 
 

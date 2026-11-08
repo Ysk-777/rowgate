@@ -38,6 +38,10 @@ class RowGateError(Exception):
         """The message as printable lines."""
         return [f"error: {self._text(debug)}"]
 
+    def json_fields(self, debug: bool = False) -> tuple[str, list[str]]:
+        """The message and its detail lines, for the JSON error object."""
+        return self._text(debug), []
+
     def debug_lines(self) -> list[str]:
         """Extra lines printed with --debug: DuckDB's own message, if there is one."""
         if self.duckdb_message is None:
@@ -69,6 +73,9 @@ class RulesError(RowGateError):
         noun = "problem" if count == 1 else "problems"
         super().__init__(f"invalid rules file {quoted(path)} ({count} {noun})")
 
+    def json_fields(self, debug: bool = False) -> tuple[str, list[str]]:
+        return self.message, list(self.problems)
+
     def lines(self, debug: bool = False) -> list[str]:
         if len(self.problems) == 1:
             return [f"error: {escaped(self.path)}: {self.problems[0]}"]
@@ -88,6 +95,9 @@ class DataError(RowGateError):
     ) -> None:
         super().__init__(message, duckdb_message=duckdb_message, duckdb_summary=duckdb_summary)
         self.details = details or []
+
+    def json_fields(self, debug: bool = False) -> tuple[str, list[str]]:
+        return self._text(debug), list(self.details)
 
     def lines(self, debug: bool = False) -> list[str]:
         return [f"error: {self._text(debug)}", *(f"  {detail}" for detail in self.details)]

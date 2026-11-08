@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "rowgate_version": "0.1.0",
+  "source": {
+    "path": "data.parquet",
+    "format": "parquet",
+    "columns": 5
+  },
+  "summary": {
+    "passed": 0,
+    "failed": 6,
+    "warned": 0,
+    "total_rows": 5
+  },
+  "checks": [
+    {
+      "index": 1,
+      "rule": "range",
+      "column": "d",
+      "column_type": "DOUBLE",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 4,
+      "message": "4 of 5 rows are not a number from 0 to 10",
+      "samples": [
+        {
+          "row": 2,
+          "value": "nan",
+          "count": null,
+          "length": 3,
+          "truncated": false
+        },
+        {
+          "row": 3,
+          "value": "inf",
+          "count": null,
+          "length": 3,
+          "truncated": false
+        }
+      ],
+      "not_shown": 2
+    },
+    {
+      "index": 2,
+      "rule": "in_set",
+      "column": "b",
+      "column_type": "BIGINT",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 2,
+      "message": "2 of 5 rows have a value outside the set",
+      "samples": [
+        {
+          "row": 1,
+          "value": "9007199254740993",
+          "count": null,
+          "length": 16,
+          "truncated": false
+        },
+        {
+          "row": 3,
+          "value": "9007199254740992",
+          "count": null,
+          "length": 16,
+          "truncated": false
+        }
+      ],
+      "not_shown": 0
+    },
+    {
+      "index": 3,
+      "rule": "range",
+      "column": "day",
+      "column_type": "DATE",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 1,
+      "message": "1 of 5 rows is not a date of at most 2024-12-31",
+      "samples": [
+        {
+          "row": 2,
+          "value": "2025-01-01",
+          "count": null,
+          "length": 10,
+          "truncated": false
+        }
+      ],
+      "not_shown": 0
+    },
+    {
+      "index": 4,
+      "rule": "in_set",
+      "column": "flag",
+      "column_type": "BOOLEAN",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 2,
+      "message": "2 of 5 rows have a value outside the set",
+      "samples": [
+        {
+          "row": 2,
+          "value": "false",
+          "count": null,
+          "length": 5,
+          "truncated": false
+        },
+        {
+          "row": 5,
+          "value": "false",
+          "count": null,
+          "length": 5,
+          "truncated": false
+        }
+      ],
+      "not_shown": 0
+    },
+    {
+      "index": 5,
+      "rule": "unique",
+      "column": "price",
+      "column_type": "DECIMAL(18,2)",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 4,
+      "message": "4 of 5 rows have a value that appears more than once",
+      "samples": [
+        {
+          "row": 1,
+          "value": "1.10",
+          "count": 2,
+          "length": 4,
+          "truncated": false
+        },
+        {
+          "row": 3,
+          "value": "2.00",
+          "count": 2,
+          "length": 4,
+          "truncated": false
+        }
+      ],
+      "not_shown": 0
+    },
+    {
+      "index": 6,
+      "rule": "regex",
+      "column": "d",
+      "column_type": "DOUBLE",
+      "severity": "error",
+      "status": "failed",
+      "failing_rows": 4,
+      "message": "4 of 5 rows do not match the pattern",
+      "samples": [
+        {
+          "row": 2,
+          "value": "nan",
+          "count": null,
+          "length": 3,
+          "truncated": false
+        },
+        {
+          "row": 3,
+          "value": "inf",
+          "count": null,
+          "length": 3,
+          "truncated": false
+        }
+      ],
+      "not_shown": 2
+    }
+  ]
+}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from rowgate.errors import DataError, RowGateError, RulesError
+from rowgate.errors import DEBUG_HINT, DataError, RowGateError, RulesError, UsageError
 
 
 def test_plain_error_renders_one_line() -> None:
@@ -60,3 +60,14 @@ def test_details_follow_the_hint() -> None:
     error = DataError("could not read", ["detail"], duckdb_message="x")
     assert error.lines()[1:] == ["  detail"]
     assert error.lines()[0].startswith("error: could not read; run again with --debug")
+
+
+def test_json_fields_give_the_message_and_its_details() -> None:
+    assert UsageError("bad option").json_fields() == ("bad option", [])
+    rules = RulesError("r.yaml", ["first", "second"])
+    assert rules.json_fields() == ("invalid rules file 'r.yaml' (2 problems)", ["first", "second"])
+    data = DataError(
+        "cannot read 'd.csv'", ["one detail"], duckdb_message="raw", duckdb_summary="x"
+    )
+    assert data.json_fields() == (f"cannot read 'd.csv': x; {DEBUG_HINT}", ["one detail"])
+    assert data.json_fields(debug=True) == ("cannot read 'd.csv'", ["one detail"])
