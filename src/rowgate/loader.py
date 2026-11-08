@@ -225,9 +225,15 @@ _RulesLoader.add_constructor(_AMBIGUOUS_TAG, _RulesLoader.construct_ambiguous)
 _RulesLoader.add_constructor(_FLOAT_TAG, _construct_decimal)
 
 
-def read_rules_text(path: Path) -> str:
-    """Return the text of a rules file, decoded as UTF-8."""
+def read_rules_text(path: str | Path) -> str:
+    """Return the text of a rules file, decoded as UTF-8.
+
+    Messages show ``path`` as given: a str is kept as typed (Path would turn
+    "./rules.yaml" into "rules.yaml", and "a/b.yaml" into "a\\b.yaml" on
+    Windows).
+    """
     shown = str(path)
+    path = Path(path)
     if path.is_dir():
         raise RulesError(shown, ["is a directory, not a rules file"])
     try:
@@ -273,7 +279,7 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
-def load_rules(path: Path) -> RulesFile:
+def load_rules(path: str | Path) -> RulesFile:
     """Read, parse and validate a rules file. Raises RulesError listing every problem."""
     shown = str(path)
     data = parse_rules_yaml(read_rules_text(path), shown)

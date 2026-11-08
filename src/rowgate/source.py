@@ -219,7 +219,7 @@ class Dataset:
         self.close()
 
 
-def open_dataset(rules_path: Path, source: Source) -> Dataset:
+def open_dataset(rules_path: str | Path, source: Source) -> Dataset:
     """Check and open the data file named in the rules, relative to the rules file."""
     shown = source.path
     path = resolve_data_path(rules_path, source)
@@ -290,9 +290,14 @@ def _without_trailing_blank_lines(
     return f"(SELECT * FROM {relation} LIMIT $rowgate_rows)", layout.rows  # noqa: S608
 
 
-def resolve_data_path(rules_path: Path, source: Source) -> Path:
-    """The absolute path of the data file, after checking it is a readable, non-empty file."""
+def resolve_data_path(rules_path: str | Path, source: Source) -> Path:
+    """The absolute path of the data file, after checking it is a readable, non-empty file.
+
+    ``rules_path`` is shown in messages as given (see loader.read_rules_text).
+    """
     shown = source.path
+    shown_rules = str(rules_path)
+    rules_path = Path(rules_path)
     given = Path(source.path)
     path = (given if given.is_absolute() else rules_path.parent / given).resolve()
     # Messages never print the absolute path: in CI logs it would show the
@@ -306,7 +311,7 @@ def resolve_data_path(rules_path: Path, source: Source) -> Path:
     if not path.exists():
         where = ""
         if not given.is_absolute():
-            where = f", relative to the rules file {quoted(str(rules_path))}"
+            where = f", relative to the rules file {quoted(shown_rules)}"
         raise DataError(f"data file {quoted(shown)} not found{where}")
     if path.is_dir():
         raise DataError(f"{quoted(shown)} is a directory, not a data file")

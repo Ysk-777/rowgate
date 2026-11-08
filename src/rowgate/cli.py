@@ -35,8 +35,10 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
 )
 
+# Text, not Path, so messages show the path exactly as typed: Path would turn
+# "./rules.yaml" into "rules.yaml", and "a/b.yaml" into "a\\b.yaml" on Windows.
 RulesArgument = Annotated[
-    Path,
+    str,
     typer.Argument(metavar="RULES.yaml", help="Path to the rules YAML file.", show_default=False),
 ]
 DebugOption = Annotated[
@@ -189,7 +191,7 @@ def validate(rules: RulesArgument, debug: DebugOption = False) -> None:
         noun = "check" if count == 1 else "checks"
         source = rules_file.source
         typer.echo(
-            f"{escaped(str(rules))} is valid: {count} {noun} on {escaped(source.path)} "
+            f"{escaped(rules)} is valid: {count} {noun} on {escaped(source.path)} "
             f"({source.file_format})"
         )
 

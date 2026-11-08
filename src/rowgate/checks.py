@@ -104,7 +104,7 @@ class Report:
 
 
 def run_checks(
-    rules: RulesFile, rules_path: Path, max_samples: int | None = DEFAULT_SAMPLES
+    rules: RulesFile, rules_path: str | Path, max_samples: int | None = DEFAULT_SAMPLES
 ) -> Report:
     """Open the data file named in the rules and run every check, in order.
 

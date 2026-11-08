@@ -163,3 +163,27 @@ def test_missing_column_errors_show_backslashes_as_written(
         "  check 1 (not_null): no column 'C:\\coll' (did you mean 'C:\\col'?)\n"
         "  the file has 1 column: 'C:\\col'\n"
     )
+
+
+def test_the_rules_path_is_shown_exactly_as_typed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Path would print ./rules.yaml as rules.yaml everywhere, and a/b.yaml as
+    # a\b.yaml on Windows; RowGate keeps the text the user typed.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rules.yaml").write_text(
+        "version: 1\nsource: {path: missing.csv}\nchecks: [{rule: row_count, min: 1}]\n",
+        encoding="utf-8",
+    )
+    assert run("validate", "./rules.yaml") == (
+        0,
+        "./rules.yaml is valid: 1 check on missing.csv (csv)\n",
+        "",
+    )
+    code, _, err = run("check", ".//rules.yaml")
+    assert code == 2
+    assert err == (
+        "error: data file 'missing.csv' not found, relative to the rules file './/rules.yaml'\n"
+    )
+    code, _, err = run("validate", "./nope.yaml")
+    assert (code, err) == (2, "error: ./nope.yaml: file not found\n")
